@@ -1,6 +1,6 @@
 ;;; starhugger.el --- Hugging Face/AI-powered text & code completion client  -*- lexical-binding: t; -*-
 
-;; Version: 0.6.0-git
+;; Version: 0.7.0-git
 ;; Package-Requires: ((emacs "28.2") (compat "29.1.4.0") (dash "2.18.0") (s "1.13.1") (spinner "1.7.4") (request "0.3.2"))
 ;; Keywords: completion, convenience, languages
 ;; Homepage: https://gitlab.com/daanturo/starhugger.el
@@ -593,6 +593,100 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
        :process request-proc
        :request-response request-obj))))
 
+;;;;;; OpenAI-compatible API
+
+;; Default value: Ollama's local server
+(defcustom starhugger-openai-compat-url "http://localhost:11434/v1/"
+  "Base URL for OpenAI-compatible API.
+Must include the trailing \"/\"."
+  :group 'starhugger
+  :type 'string)
+
+(defcustom starhugger-openai-compat-completions-parameters '((stream . :false))
+  "Parameters for the /v1/completions endpoint.
+An alist (Info node `(elisp) Association Lists') to be converted to JSON
+with `json-serialize'.  See
+https://platform.openai.com/docs/api-reference/completions/create."
+  :group 'starhugger
+  :type 'alist)
+
+(defun starhugger-openai-compat-api
+    (prompt
+     callback
+     &rest
+     args
+     &key
+     model
+     force-new
+     max-new-tokens
+     prefix
+     suffix
+     &allow-other-keys)
+  (-let* ((model (or model starhugger-model-id))
+          ;; /v1/chat/completions doesn't support suffix
+          (url (concat starhugger-openai-compat-url "completions"))
+          (sending-data
+           (starhugger--json-serialize
+            `((prompt .
+                      ,(or prefix prompt))
+              (model . ,model)
+              ,@(and suffix `((suffix . ,suffix)))
+              ,@(and max-new-tokens `((max_tokens . ,max-new-tokens)))
+              ,@(and force-new
+                     starhugger-retry-temperature-range
+                     `((temperature . ,(starhugger--retry-temperature))))
+              ,@(and starhugger-chop-stop-token
+                     `((stop . [,@starhugger-stop-tokens])))
+              (echo . :false)
+              (stream . :false)
+              ,@starhugger-openai-compat-completions-parameters))))
+    (starhugger--log-before-request url sending-data)
+    (-let* ((request-obj
+             (starhugger--request-dot-el-request url
+               :type "POST"
+               :data sending-data
+               :error #'ignore
+               :complete
+               (cl-function
+                (lambda (&rest
+                         returned
+                         &key
+                         data
+                         error-thrown
+                         response
+                         &allow-other-keys)
+                  (-let* ((generated-lst
+                           (if error-thrown
+                               '()
+                             (-some-->
+                                 data
+                               (json-parse-string it :object-type 'alist)
+                               (alist-get 'choices it)
+                               (seq-map
+                                (lambda (choice)
+                                  (alist-get 'text choice))
+                                it)))))
+                    (starhugger--log-after-request
+                     (list
+                      :response-content returned
+                      :send-data sending-data
+                      :response-status
+                      (request-response-status-code response))
+                     error-thrown)
+                    (funcall callback
+                             generated-lst
+                             :model model
+                             :error
+                             (and error-thrown
+                                  `((error-thrown ,error-thrown)
+                                    (data ,data)))))))))
+            (request-buf (request-response--buffer request-obj))
+            (request-proc (get-buffer-process request-buf))
+            (cancel-fn (lambda () (request-abort request-obj))))
+      (list
+       :cancel-fn cancel-fn
+       :process request-proc
+       :request-response request-obj))))
 
 ;;;;; Completion
 
