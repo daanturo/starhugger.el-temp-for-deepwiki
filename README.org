@@ -67,19 +67,6 @@ There is also ~starhugger-auto-mode~ (non-global minor mode), but take note of i
   (define-key starhugger-inlining-mode-map (kbd "M-f") (starhugger-inline-menu-item #'starhugger-accept-suggestion-by-word)))
 #+end_src
 
-Use the Hugging Face backend:
-
-#+begin_src elisp
-(setq starhugger-completion-backend-function #'starhugger-hugging-face-inference-api)
-
-(setq starhugger-hugging-face-api-token "hf_ your token here")
-
-(setopt starhugger-model-id "organization/some-model")
-;; Appropriate tokens for the model
-(setq starhugger-fill-tokens '("<PRE>" "<SUF>" "<MID>"))
-(setq starhugger-stop-tokens '("<|endoftext|>" "<EOT>"))
-#+end_src
-
 Additional settings:
 
 #+begin_src elisp

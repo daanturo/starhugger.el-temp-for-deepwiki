@@ -57,40 +57,33 @@ window of BUFFER-OR-NAME when at the buffer end, if any."
        (with-current-buffer ,buffer-or-name
          ,@body)))))
 
+(cl-defun starthugger--join-strings-no-repeat-separator (components &optional (separator "/"))
+  "Join COMPONENTS with SEPARATOR in between, without repeating it.
+Joining [\"a\" \"b\"], [\"a\" \"/b\"], [\"a/\" \"b\"], [\"a/\" \"/b\"]
+all give \"a/b\"."
+  (named-let
+      recur
+      ((comps (seq-rest components))
+       (retval
+        (ignore-error '(args-out-of-range)
+          (seq-first components))))
+    (-let* ((new
+             (ignore-error '(args-out-of-range)
+               (seq-first comps)))
+            (suf-old (string-suffix-p separator retval))
+            (pre-new (string-prefix-p separator new)))
+      (cond
+       ((seq-empty-p comps)
+        retval)
+       ((and suf-old pre-new)
+        (recur
+         (seq-rest comps) (concat retval (substring new (length separator)))))
+       ((or suf-old pre-new)
+        (recur (seq-rest comps) (concat retval new)))
+       (:else
+        (recur (seq-rest comps) (concat retval separator new)))))))
+
 ;;;; Making requests
-
-(define-obsolete-variable-alias
-  'starhugger-api-token 'starhugger-hugging-face-api-token "0.5.0")
-
-(defcustom starhugger-hugging-face-api-token nil
-  "Hugging Face user access token.
-Generate yours at URL `https://huggingface.co/settings/tokens'.
-Can be either a direct string, or a function to be called with no
-arguments that returns a string.  When being a function, it has
-to be fast to return.
-
-Note: the (returned) string must be unibyte, ensure that before
-dynamically setting with (`encode-coding-string' ... \\='utf-8)."
-  :group 'starhugger
-  :type '(choice string function))
-
-(define-obsolete-variable-alias
-  'starhugger-model-api-endpoint-url
-  'starhugger-hugging-face-api-url
-  "0.5.0")
-(defvar starhugger-hugging-face-api-url nil
-  "Hugging Face text inference API's URL to make requests (includes model name).
-To be concatenated with `starhugger-hugging-face-api-base-url'
-and `starhugger-model-id'.")
-(defvar starhugger-fill-tokens)
-(defvar starhugger-stop-tokens)
-
-(defcustom starhugger-hugging-face-api-base-url
-  "https://api-inference.huggingface.co/models/"
-  "Hugging Face inference API's base URL, to be concatenated with model ID.
-See https://huggingface.co/docs/api-inference/quicktour#running-inference-with-api-requests."
-  :group 'starhugger
-  :type 'string)
 
 (defvar starhugger--model-config-presets
   '(
@@ -150,20 +143,20 @@ See https://huggingface.co/docs/api-inference/quicktour#running-inference-with-a
   (set-default-toplevel-value sym val)
   (save-match-data
     (-when-let* ((preset (starhugger--get-model-preset val)))
-      (setq starhugger-hugging-face-api-url
-            (concat starhugger-hugging-face-api-base-url val))
       (setq starhugger-fill-tokens (map-nested-elt preset '(:fill-tokens)))
       (setq starhugger-stop-tokens (map-nested-elt preset '(:stop-tokens))))))
 
 (defcustom starhugger-model-id "qwen2.5-coder"
-  "The language model's ID.
-If you want to use one of the configuration presets, set this
-before loading `starhugger.el' or use `setopt' (or Emacs's
-customization interface). Else if you use a custom model,
-configure `starhugger-hugging-face-api-url',
-`starhugger-fill-tokens', `starhugger-stop-tokens' manually (and
-you don't need to customize this variable if they are set that
-way)."
+  "The language model's name on selected platform.
+Note that starhugger currently only supports base/non-instruction
+models.
+
+If the platform doesn't support suffix requests and you want to use one
+of the limited configuration presets, set this before loading
+`starhugger.el' or use `setopt' (or Emacs's customization
+interface). Else if you use a custom model, configure
+`starhugger-fill-tokens', `starhugger-stop-tokens' manually (no need to
+customize this variable if they are set that way)."
   :group 'starhugger
   :type 'string
   :set #'starhugger--model-id-set-fn)
@@ -179,8 +172,6 @@ See
 https://github.com/huggingface/huggingface-vscode/blob/73818334f4939c2f19480a404f74944a47933a12/src/runCompletion.ts#L66"
   :group 'starhugger
   :type '(list string string string))
-
-
 
 (defcustom starhugger-generated-buffer (format "*%s*" 'starhugger)
   "Buffer name to log parsed responses."
@@ -406,113 +397,6 @@ See https://github.com/tkf/emacs-request/issues/226."
 
 ;;;;; Backends
 
-;;;;;; Hugging Face inference API
-
-(define-obsolete-variable-alias
-  'starhugger-additional-data-alist
-  'starhugger-hugging-face-additional-data-alist
-  "0.5.0")
-
-(defcustom starhugger-hugging-face-additional-data-alist
-  '((parameters
-     (return_full_text . :false) ; don't re-include the prompt
-     )
-    (options)
-    ;;
-    )
-  "Detailed parameter list.
-An association list to be converted by `json-serialize'. See
-https://huggingface.co/docs/api-inference/detailed_parameters#text-generation-task
-for parameters. Note that this packages is built around the
-parameter \"return_full_text\" being false, setting it otherwise
-may cause unexpected behaviors."
-  :group 'starhugger
-  :type 'alist)
-
-(defun starhugger--HFI-get-api-token-as-string ()
-  (cond
-   ((stringp starhugger-hugging-face-api-token)
-    starhugger-hugging-face-api-token)
-   ((functionp starhugger-hugging-face-api-token)
-    (funcall starhugger-hugging-face-api-token))))
-
-(cl-defun starhugger-HFI--request (prompt
-                                   callback
-                                   &key
-                                   data
-                                   headers
-                                   method
-                                   max-new-tokens
-                                   num-return-sequences
-                                   force-new
-                                   url
-                                   &allow-other-keys)
-  (-let* ((data
-           (or data
-               (starhugger--json-serialize
-                `((inputs . ,prompt)
-                  (parameters
-                   ,@(and max-new-tokens `((max_new_tokens . ,max-new-tokens)))
-                   ,@(and num-return-sequences
-                          `((num_return_sequences . ,num-return-sequences)))
-                   ,@(and force-new
-                          starhugger-retry-temperature-range
-                          `((temperature . ,(starhugger--retry-temperature))))
-                   ,@(alist-get
-                      'parameters starhugger-hugging-face-additional-data-alist)
-                   (return_full_text . :false))
-                  (options
-                   ,@(and force-new '((use_cache . :false)))
-                   ,@(alist-get
-                      'options starhugger-hugging-face-additional-data-alist))))))
-          (url (or url starhugger-hugging-face-api-url)))
-    (dlet ((url-request-method (or method "POST"))
-           (url-request-data data)
-           (url-request-extra-headers
-            (or headers
-                `(("Content-Type" . "application/json")
-                  ,@(-some-->
-                        (starhugger--HFI-get-api-token-as-string)
-                      `(("Authorization" . ,(format "Bearer %s" it))))))))
-      (starhugger--log-before-request url data)
-      (-let* ((request-buf
-               (url-retrieve
-                url
-                (lambda (status)
-                  (-let* ((content
-                           (and url-http-end-of-headers
-                                (buffer-substring
-                                 url-http-end-of-headers (point-max)))))
-                    (starhugger--log-after-request
-                     (list
-                      :response-content content
-                      :send-data data
-                      :response-status status)
-                     (not url-http-end-of-headers)
-                     :header
-                     (buffer-substring-no-properties
-                      (point-min) (or url-http-end-of-headers (point-max))))
-                    (funcall callback content :url url)))
-                nil t))
-              (request-proc (get-buffer-process request-buf)))
-        (list :process request-proc)))))
-
-(cl-defun starhugger-hugging-face-inference-api (prompt callback &rest args &key &allow-other-keys)
-  (apply #'starhugger-HFI--request
-         prompt
-         (cl-function
-          (lambda (content &key url)
-            (-let* ((parsed (json-parse-string content :object-type 'alist))
-                    ((_ . err-msg) (and (listp parsed) (assoc 'error parsed)))
-                    (generated-lst
-                     (and (null err-msg)
-                          (-map
-                           (lambda (elem)
-                             (alist-get 'generated_text elem))
-                           parsed))))
-              (funcall callback generated-lst :error err-msg :url url))))
-         args))
-
 ;;;;;; Ollama
 
 (defcustom starhugger-ollama-generate-api-url
@@ -596,14 +480,27 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
 ;;;;;; OpenAI-compatible API
 
 ;; Default value: Ollama's local server
-(defcustom starhugger-openai-compat-url "http://localhost:11434/v1/"
+(defcustom starhugger-openai-compat-url "http://localhost:11434/v1"
   "Base URL for OpenAI-compatible API.
-Must include the trailing \"/\"."
+See also `starhugger-openai-compat-completions-endpoint'"
   :group 'starhugger
   :type 'string)
 
-(defcustom starhugger-openai-compat-completions-parameters '((stream . :false))
-  "Parameters for the /v1/completions endpoint.
+(defcustom starhugger-openai-compat-api-key nil
+  "API key for authentication at your provider.
+This string must be unibyte, ensure that before dynamically setting
+with (`encode-coding-string' ... \\='utf-8)."
+  :group 'starhugger
+  :type ''string)
+
+(defvar starhugger-openai-compat-completions-endpoint "/completions"
+  "End point of `starhugger-openai-compat-url'.
+Currently only \"/completions\"-like endpoints are supported, although
+deprecated (https://platform.openai.com/docs/api-reference/completions),
+since \"/chat/completions\" doesn't support suffix.")
+
+(defcustom starhugger-openai-compat-completions-parameter-alist '((stream . :false))
+  "Parameters for the /completions endpoint.
 An alist (Info node `(elisp) Association Lists') to be converted to JSON
 with `json-serialize'.  See
 https://platform.openai.com/docs/api-reference/completions/create."
@@ -623,8 +520,11 @@ https://platform.openai.com/docs/api-reference/completions/create."
      suffix
      &allow-other-keys)
   (-let* ((model (or model starhugger-model-id))
-          ;; /v1/chat/completions doesn't support suffix
-          (url (concat starhugger-openai-compat-url "completions"))
+          (url
+           (starthugger--join-strings-no-repeat-separator
+            (list
+             starhugger-openai-compat-url
+             starhugger-openai-compat-completions-endpoint)))
           (sending-data
            (starhugger--json-serialize
             `((prompt .
@@ -639,11 +539,14 @@ https://platform.openai.com/docs/api-reference/completions/create."
                      `((stop . [,@starhugger-stop-tokens])))
               (echo . :false)
               (stream . :false)
-              ,@starhugger-openai-compat-completions-parameters))))
+              ,@starhugger-openai-compat-completions-parameter-alist))))
     (starhugger--log-before-request url sending-data)
     (-let* ((request-obj
              (starhugger--request-dot-el-request url
                :type "POST"
+               :header
+               `(("Authorization" .
+                  ,(format "Bearer %s" starhugger-openai-compat-api-key)))
                :data sending-data
                :error #'ignore
                :complete
@@ -691,7 +594,7 @@ https://platform.openai.com/docs/api-reference/completions/create."
 ;;;;; Completion
 
 (defcustom starhugger-completion-backend-function
-  #'starhugger-ollama-completion-api
+  #'starhugger-openai-compat-api
   "The backend for code suggestion.
 The function accepts those arguments: prompt (string), callback
 function (that accepts these arguments and should be supplied:
@@ -708,7 +611,7 @@ the running request when called, (calling `:cancel-fn' is
 prioritized over stopping `:process')."
   :group 'starhugger
   :type 'function
-  :options '(starhugger-ollama-completion-api starhugger-hugging-face-inference-api))
+  :options '(starhugger-openai-compat-api starhugger-ollama-completion-api))
 
 (defun starhugger--trim-from-stop-tokens (str &optional stop-token-lst)
   (named-let

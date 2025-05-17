@@ -1,3 +1,8 @@
+* Version 0.7.0
+
+- Add OpenAI-compatible API support make it the default, the default base URL is still Ollama's.
+- Remove Hugging Face's old text inference backend (https://github.com/daanturo/starhugger.el/issues/3).
+
 * Version 0.6.0
 
 - Use Ollama's ~suffix~ parameter (https://gitlab.com/daanturo/starhugger.el/-/merge_requests/3).
