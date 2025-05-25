@@ -376,7 +376,7 @@ It should return 2 different responses, each with 2
   (dlet ((starhugger-notify-request-error nil))
     (apply func args)))
 
-(defun starhugger--request-dot-el--silent-sentinel-a (fn proc event &rest args)
+(defun starhugger--request-el--silent-sentinel-a (fn proc event &rest args)
   (cond
    ((member event '("interrupt" "interrupt\n"))
     (dlet ((request-message-level -1))
@@ -384,7 +384,7 @@ It should return 2 different responses, each with 2
    (:else
     (apply fn proc event args))))
 
-(defun starhugger--request-dot-el-request (url &rest settings)
+(defun starhugger--request-el-request (url &rest settings)
   "Wrapper around (`request' URL @SETTINGS) that silence errors when aborting.
 See https://github.com/tkf/emacs-request/issues/226."
   (declare (indent defun))
@@ -392,7 +392,7 @@ See https://github.com/tkf/emacs-request/issues/226."
     (add-function :around
                   (process-sentinel
                    (get-buffer-process (request-response--buffer req)))
-                  #'starhugger--request-dot-el--silent-sentinel-a)
+                  #'starhugger--request-el--silent-sentinel-a)
     req))
 
 ;;;;; Backends
@@ -434,7 +434,7 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
     (starhugger--log-before-request
      starhugger-ollama-generate-api-url sending-data)
     (-let* ((request-obj
-             (starhugger--request-dot-el-request
+             (starhugger--request-el-request
                starhugger-ollama-generate-api-url
                :type "POST"
                :data sending-data
@@ -542,7 +542,7 @@ https://platform.openai.com/docs/api-reference/completions/create."
               ,@starhugger-openai-compat-completions-parameter-alist))))
     (starhugger--log-before-request url sending-data)
     (-let* ((request-obj
-             (starhugger--request-dot-el-request url
+             (starhugger--request-el-request url
                :type "POST"
                :header
                `(("Authorization" .
