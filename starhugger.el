@@ -83,6 +83,9 @@ all give \"a/b\"."
        (:else
         (recur (seq-rest comps) (concat retval separator new)))))))
 
+(defun starhugger--project-root (&optional dir)
+  (-some--> (project-current nil dir) (project-root it)))
+
 ;;;; Making requests
 
 (defvar starhugger--model-config-presets
@@ -319,9 +322,13 @@ Enable this when the return_full_text parameter isn't honored."
   "Enable using code from both before and after point as prompt.
 Unless just before the buffer end's trailing newlines (if any),
 in that case don't use fill mode. See `starhugger-fill-tokens'
-for the relevant tokens."
+for the relevant tokens.
+
+If set to the symbol 'instruct, starhugger will try to construct a
+prompt that tells the instruction-tuned language model to fill in the
+spot, enable making use of chat models that don't support FIM."
   :group 'starhugger
-  :type 'boolean)
+  :type '(choice boolean (const instruct)))
 
 (defcustom starhugger-prompt-after-point-fraction (/ 1.0 4)
   "The length fraction that code after point should take in the prompt."
@@ -482,7 +489,7 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
 ;; Default value: Ollama's local server
 (defcustom starhugger-openai-compat-url "http://localhost:11434/v1"
   "Base URL for OpenAI-compatible API.
-See also `starhugger-openai-compat-completions-endpoint'"
+See also `starhugger-openai-compat-base-completions-endpoint'"
   :group 'starhugger
   :type 'string)
 
@@ -493,13 +500,10 @@ with (`encode-coding-string' ... \\='utf-8)."
   :group 'starhugger
   :type ''string)
 
-(defvar starhugger-openai-compat-completions-endpoint "/completions"
-  "End point of `starhugger-openai-compat-url'.
-Currently only \"/completions\"-like endpoints are supported, although
-deprecated (https://platform.openai.com/docs/api-reference/completions),
-since \"/chat/completions\" doesn't support suffix.")
+(defvar starhugger-openai-compat-base-completions-endpoint "/completions"
+  "Base models's completions endpoint of `starhugger-openai-compat-url'.")
 
-(defcustom starhugger-openai-compat-completions-parameter-alist '((stream . :false))
+(defcustom starhugger-openai-compat-base-completions-parameter-alist '((stream . :false))
   "Parameters for the /completions endpoint.
 An alist (Info node `(elisp) Association Lists') to be converted to JSON
 with `json-serialize'.  See
@@ -507,7 +511,15 @@ https://platform.openai.com/docs/api-reference/completions/create."
   :group 'starhugger
   :type 'alist)
 
-(defun starhugger-openai-compat-api
+(defvar starhugger-openai-compat-chat-completions-endpoint "/chat/completions"
+  "Chat models's completions endpoint of `starhugger-openai-compat-url'.")
+
+(defcustom starhugger-openai-compat-chat-completions-parameter-alist '((stream . :false))
+  "Parameters for the /chat/completions endpoint."
+  :group 'starhugger
+  :type 'alist)
+
+(defun starhugger-openai-compat-api-base-completions
     (prompt
      callback
      &rest
@@ -524,7 +536,7 @@ https://platform.openai.com/docs/api-reference/completions/create."
            (starthugger--join-strings-no-repeat-separator
             (list
              starhugger-openai-compat-url
-             starhugger-openai-compat-completions-endpoint)))
+             starhugger-openai-compat-base-completions-endpoint)))
           (sending-data
            (starhugger--json-serialize
             `((prompt .
@@ -539,7 +551,7 @@ https://platform.openai.com/docs/api-reference/completions/create."
                      `((stop . [,@starhugger-stop-tokens])))
               (echo . :false)
               (stream . :false)
-              ,@starhugger-openai-compat-completions-parameter-alist))))
+              ,@starhugger-openai-compat-base-completions-parameter-alist))))
     (starhugger--log-before-request url sending-data)
     (-let* ((request-obj
              (starhugger--request-el-request url
@@ -591,10 +603,94 @@ https://platform.openai.com/docs/api-reference/completions/create."
        :process request-proc
        :request-response request-obj))))
 
+(defun starhugger-openai-compat-api-chat-completions
+    (prompt
+     callback
+     &rest
+     args
+     &key
+     model
+     force-new
+     max-new-tokens
+     prefix
+     suffix
+     &allow-other-keys)
+  (-let* ((model (or model starhugger-model-id))
+          (url
+           (starthugger--join-strings-no-repeat-separator
+            (list
+             starhugger-openai-compat-url
+             starhugger-openai-compat-chat-completions-endpoint)))
+          (sending-data
+           (starhugger--json-serialize
+            `((prompt .
+                      ,(or prefix prompt))
+              (model . ,model)
+              ,@(and suffix `((suffix . ,suffix)))
+              ,@(and max-new-tokens `((max_tokens . ,max-new-tokens)))
+              ,@(and force-new
+                     starhugger-retry-temperature-range
+                     `((temperature . ,(starhugger--retry-temperature))))
+              ,@(and starhugger-chop-stop-token
+                     `((stop . [,@starhugger-stop-tokens])))
+              (echo . :false)
+              (stream . :false)
+              ,@starhugger-openai-compat-chat-completions-parameter-alist))))
+    (starhugger--log-before-request url sending-data)
+    (-let* ((request-obj
+             (starhugger--request-el-request url
+               :type "POST"
+               :header
+               `(("Authorization" .
+                  ,(format "Bearer %s" starhugger-openai-compat-api-key)))
+               :data sending-data
+               :error #'ignore
+               :complete
+               (cl-function
+                (lambda (&rest
+                         returned
+                         &key
+                         data
+                         error-thrown
+                         response
+                         &allow-other-keys)
+                  (-let* ((generated-lst
+                           (if error-thrown
+                               '()
+                             (-some-->
+                                 data
+                               (json-parse-string it :object-type 'alist)
+                               (alist-get 'choices it)
+                               (seq-map
+                                (lambda (choice)
+                                  (map-nested-elt choice '(message content)))
+                                it)))))
+                    (starhugger--log-after-request
+                     (list
+                      :response-content returned
+                      :send-data sending-data
+                      :response-status
+                      (request-response-status-code response))
+                     error-thrown)
+                    (funcall callback
+                             generated-lst
+                             :model model
+                             :error
+                             (and error-thrown
+                                  `((error-thrown ,error-thrown)
+                                    (data ,data)))))))))
+            (request-buf (request-response--buffer request-obj))
+            (request-proc (get-buffer-process request-buf))
+            (cancel-fn (lambda () (request-abort request-obj))))
+      (list
+       :cancel-fn cancel-fn
+       :process request-proc
+       :request-response request-obj))))
+
 ;;;;; Completion
 
 (defcustom starhugger-completion-backend-function
-  #'starhugger-openai-compat-api
+  #'starhugger-openai-compat-api-base-completions
   "The backend for code suggestion.
 The function accepts those arguments: prompt (string), callback
 function (that accepts these arguments and should be supplied:
@@ -611,7 +707,10 @@ the running request when called, (calling `:cancel-fn' is
 prioritized over stopping `:process')."
   :group 'starhugger
   :type 'function
-  :options '(starhugger-openai-compat-api starhugger-ollama-completion-api))
+  :options
+  '(starhugger-openai-compat-api-chat-completions
+    starhugger-openai-compat-api-base-completions
+    starhugger-ollama-completion-api))
 
 (defun starhugger--trim-from-stop-tokens (str &optional stop-token-lst)
   (named-let
@@ -960,6 +1059,73 @@ prompt."
          (string-trim-left it)
        it))))
 
+(defun starhugger--instruct-unique-fill-token (content)
+  (named-let
+      recur ((token "<FILL>"))
+    (cond
+     ((string-search token content)
+      (recur (concat "<FILL-" (substring token 2))))
+     (:else
+      token))))
+
+(defun starhugger-instruct-build-prompt-default
+    (prefix suffix &optional context-list)
+  (-let* ((merged-context
+           (cond
+            (context-list
+             (-->
+              context-list
+              (-map
+               (-lambda ((filename snippet . _))
+                 (format "%s\n```\n%s\n```" filename snippet))
+               it)
+              (string-join it "\n\n") (format "\n%s\n" it)))
+            (:else "")))
+          (fill-token
+           (starhugger--instruct-unique-fill-token
+            (concat merged-context prefix suffix)))
+          (prj-root (starhugger--project-root))
+          (curr-filename
+           (cond
+            ((and buffer-file-name prj-root)
+             (file-relative-name (file-truename buffer-file-name)
+                                 (file-truename prj-root)))
+            (buffer-file-name
+             (file-name-nondirectory buffer-file-name))
+            (:else
+             ""))))
+    (-->
+     "You are a code/text completion expert. Your task is to fill in missing code or text.
+The input format uses <FILL> to mark where content should be inserted.
+
+- Provide ONLY the replacement text/code for the <FILL> token
+- Do NOT include markdown formatting, code blocks, or any other wrapper
+- Do NOT repeat the surrounding text
+- Include comments when needed, also if you want to add remarks write them as comments
+- Ensure proper indentation and formatting that matches the surrounding code
+- The fill may be partial line content, complete statements, or multiple lines
+
+Now complete:
+%s
+%s
+```
+%s
+```
+
+The replacement for <FILL> is:"
+     (if (equal "<FILL>" fill-token)
+         it
+       (string-replace "<FILL>" fill-token it))
+     (format it
+             merged-context
+             curr-filename
+             (concat prefix fill-token suffix)))))
+
+(defcustom starhugger-instruct-build-prompt-function
+  #'starhugger-instruct-build-prompt-default
+  "Function to construct the prompt when `starhugger-fill-in-the-middle' is 'instruct."
+  :type 'function)
+
 (defun starhugger--prompt-build-components ()
   (if (and starhugger-fill-in-the-middle
            starhugger-fill-tokens
@@ -1037,7 +1203,7 @@ dependencies. Also remember to reduce
           ((pre-token mid-token suf-token) starhugger-fill-tokens)
           (preset (starhugger--get-model-preset))
           (file-sep (map-nested-elt preset '(:file-separator)))
-          (wrapped-callback
+          (grep-ctx-callback
            (lambda (dumb-context)
              (-let* ((prompt
                       (cond
@@ -1052,20 +1218,28 @@ dependencies. Also remember to reduce
                        (t
                         (concat dumb-context pre-code)))))
                (funcall callback prompt)))))
-    (if starhugger-enable-dumb-grep-context
-        (progn
-          (require 'starhugger-grep-context)
-          (cond
-           ((and file-sep)
-            (starhugger-grep-context--file-sep-before-prefix
-             callback pre-code suf-code file-sep))
-           (:else
-            (starhugger-grep-context--prefix-comments
-             wrapped-callback pre-code suf-code))))
+    (cond
+     ((member starhugger-fill-in-the-middle '(instruct))
+      (funcall callback
+               (funcall starhugger-instruct-build-prompt-function
+                        pre-code
+                        suf-code)
+               :prefix pre-code
+               :suffix suf-code))
+     (starhugger-enable-dumb-grep-context
+      (require 'starhugger-grep-context)
+      (cond
+       ((and file-sep)
+        (starhugger-grep-context--file-sep-before-prefix
+         callback pre-code suf-code file-sep))
+       (:else
+        (starhugger-grep-context--prefix-comments
+         grep-ctx-callback pre-code suf-code))))
+     (:else
       (funcall callback
                (starhugger--fim-concatenate pre-code suf-code)
                :prefix pre-code
-               :suffix suf-code))))
+               :suffix suf-code)))))
 
 (defun starhugger--get-from-num-or-list (num-or-list &optional idx)
   (cond
