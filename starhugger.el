@@ -282,7 +282,8 @@ Additionally prevent errors about multi-byte characters."
          (starhugger--record-propertize
           (concat starhugger--record-heading-beg "API INPUT: ")))
         (insert (format "(info: %S)" args) "\n\n")
-        (insert prompt)
+        (when (stringp prompt)
+          (insert prompt))
         (insert "\n\n")
 
         (if (equal parsed-response-list '())
@@ -317,6 +318,22 @@ Enable this when the return_full_text parameter isn't honored."
   "Whether to remove `starhugger-stop-tokens' before inserting."
   :group 'starhugger
   :type 'boolean)
+
+(defcustom starhugger-post-process-chain
+  `(
+    ;; "```.*\n\([^z-a]+\)\n```[ \t\n\r]*\\'"
+    (,(rx
+       "```"
+       (* not-newline)
+       "\n"
+       (group (+ anything))
+       "\n```"
+       (* (or " " "\t" "\n" "\r"))
+       string-end)
+     "\\1")
+    ("<think>[^z-a]*</think>[ \t\n\r]*" ""))
+  "List of functions and replace regexes."
+  :type '(repeat (choice function (list regexp string))))
 
 (defcustom starhugger-fill-in-the-middle t
   "Enable using code from both before and after point as prompt.
@@ -547,8 +564,6 @@ https://platform.openai.com/docs/api-reference/completions/create."
               ,@(and force-new
                      starhugger-retry-temperature-range
                      `((temperature . ,(starhugger--retry-temperature))))
-              ,@(and starhugger-chop-stop-token
-                     `((stop . [,@starhugger-stop-tokens])))
               (echo . :false)
               (stream . :false)
               ,@starhugger-openai-compat-base-completions-parameter-alist))))
@@ -603,7 +618,7 @@ https://platform.openai.com/docs/api-reference/completions/create."
        :process request-proc
        :request-response request-obj))))
 
-(defun starhugger-openai-compat-api-chat-completions
+(cl-defun starhugger-openai-compat-api-chat-completions
     (prompt
      callback
      &rest
@@ -614,6 +629,7 @@ https://platform.openai.com/docs/api-reference/completions/create."
      max-new-tokens
      prefix
      suffix
+     messages
      &allow-other-keys)
   (-let* ((model (or model starhugger-model-id))
           (url
@@ -623,17 +639,12 @@ https://platform.openai.com/docs/api-reference/completions/create."
              starhugger-openai-compat-chat-completions-endpoint)))
           (sending-data
            (starhugger--json-serialize
-            `((prompt .
-                      ,(or prefix prompt))
+            `((messages . ,messages)
               (model . ,model)
-              ,@(and suffix `((suffix . ,suffix)))
               ,@(and max-new-tokens `((max_tokens . ,max-new-tokens)))
               ,@(and force-new
                      starhugger-retry-temperature-range
                      `((temperature . ,(starhugger--retry-temperature))))
-              ,@(and starhugger-chop-stop-token
-                     `((stop . [,@starhugger-stop-tokens])))
-              (echo . :false)
               (stream . :false)
               ,@starhugger-openai-compat-chat-completions-parameter-alist))))
     (starhugger--log-before-request url sending-data)
@@ -728,6 +739,19 @@ prioritized over stopping `:process')."
        (:else
         (recur (cdr stop-token-lst) retval))))))
 
+(defun starhugger--post-process (str)
+  (named-let
+      recur ((retval str) (chain starhugger-post-process-chain))
+    (-let* ((op (car chain)))
+      (cond
+       ((seq-empty-p chain)
+        retval)
+       ((and (listp op) (= 2 (length op)) (-every #'stringp op))
+        (recur
+         (replace-regexp-in-string (nth 0 op) (nth 1 op) retval) (cdr chain)))
+       ((functionp op)
+        (recur (funcall op retval) (cdr chain)))))))
+
 (cl-defun starhugger--query-internal (prompt callback &rest args &key display spin backend caller &allow-other-keys)
   "CALLBACK is called with the generated text list and a plist.
 PROMPT is the prompt to use. DISPLAY is whether to display the
@@ -761,11 +785,13 @@ ARGS are the arguments to pass to the BACKEND (or
                           (funcall spin-obj))
                         (-let* ((err-str (format "%S" error))
                                 (gen-texts-post-process
-                                 (if manual-trim-stop-tokens
-                                     (-map
-                                      #'starhugger--trim-from-stop-tokens
-                                      gen-texts)
-                                   gen-texts)))
+                                 (-->
+                                  gen-texts
+                                  (if manual-trim-stop-tokens
+                                      (-map
+                                       #'starhugger--trim-from-stop-tokens it)
+                                    it)
+                                  (-map #'starhugger--post-process it))))
                           (starhugger--record-generated
                            prompt
                            gen-texts
@@ -1068,34 +1094,37 @@ prompt."
      (:else
       token))))
 
-(defun starhugger-instruct-build-prompt-default
+(defun starhugger-instruct-build-messages-default
     (prefix suffix &optional context-list)
-  (-let* ((merged-context
-           (cond
-            (context-list
-             (-->
-              context-list
-              (-map
-               (-lambda ((filename snippet . _))
-                 (format "%s\n```\n%s\n```" filename snippet))
-               it)
-              (string-join it "\n\n") (format "\n%s\n" it)))
-            (:else "")))
-          (fill-token
-           (starhugger--instruct-unique-fill-token
-            (concat merged-context prefix suffix)))
-          (prj-root (starhugger--project-root))
-          (curr-filename
-           (cond
-            ((and buffer-file-name prj-root)
-             (file-relative-name (file-truename buffer-file-name)
-                                 (file-truename prj-root)))
-            (buffer-file-name
-             (file-name-nondirectory buffer-file-name))
-            (:else
-             ""))))
-    (-->
-     "You are a code/text completion expert. Your task is to fill in missing code or text.
+  (-let*
+      ((merged-context
+        (cond
+         (context-list
+          (-->
+           context-list
+           (-map
+            (-lambda ((filename snippet . _))
+              (format "%s\n```\n%s\n```" filename snippet))
+            it)
+           (string-join it "\n\n") (format "\n%s\n" it)))
+         (:else
+          "")))
+       (fill-token
+        (starhugger--instruct-unique-fill-token
+         (concat merged-context prefix suffix)))
+       (prj-root (starhugger--project-root))
+       (curr-filename
+        (cond
+         ((and buffer-file-name prj-root)
+          (file-relative-name (file-truename buffer-file-name)
+                              (file-truename prj-root)))
+         (buffer-file-name
+          (file-name-nondirectory buffer-file-name))
+         (:else
+          "")))
+       (system-prompt
+        (-->
+         "You are a code/text completion expert. Your task is to fill in missing code or text.
 The input format uses <FILL> to mark where content should be inserted.
 
 - Provide ONLY the replacement text/code for the <FILL> token
@@ -1103,26 +1132,31 @@ The input format uses <FILL> to mark where content should be inserted.
 - Do NOT repeat the surrounding text
 - Include comments when needed, also if you want to add remarks write them as comments
 - Ensure proper indentation and formatting that matches the surrounding code
-- The fill may be partial line content, complete statements, or multiple lines
-
-Now complete:
-%s
+- The fill may be partial line content, complete statements, or multiple lines"
+         (if (equal "<FILL>" fill-token)
+             it
+           (string-replace "<FILL>" fill-token it))))
+       (user-prompt
+        (-->
+         "%s
 %s
 ```
 %s
 ```
 
 The replacement for <FILL> is:"
-     (if (equal "<FILL>" fill-token)
-         it
-       (string-replace "<FILL>" fill-token it))
-     (format it
-             merged-context
-             curr-filename
-             (concat prefix fill-token suffix)))))
+         (if (equal "<FILL>" fill-token)
+             it
+           (string-replace "<FILL>" fill-token it))
+         (format it
+                 merged-context
+                 curr-filename
+                 (concat prefix fill-token suffix)))))
+    `[((role . "system") (content . ,system-prompt))
+      ((role . "user") (content . ,user-prompt))]))
 
-(defcustom starhugger-instruct-build-prompt-function
-  #'starhugger-instruct-build-prompt-default
+(defcustom starhugger-instruct-build-messages-function
+  #'starhugger-instruct-build-messages-default
   "Function to construct the prompt when `starhugger-fill-in-the-middle' is 'instruct."
   :type 'function)
 
@@ -1220,12 +1254,15 @@ dependencies. Also remember to reduce
                (funcall callback prompt)))))
     (cond
      ((member starhugger-fill-in-the-middle '(instruct))
-      (funcall callback
-               (funcall starhugger-instruct-build-prompt-function
+      (-let* ((messages
+               (funcall starhugger-instruct-build-messages-function
                         pre-code
-                        suf-code)
-               :prefix pre-code
-               :suffix suf-code))
+                        suf-code)))
+        (funcall callback
+                 nil
+                 :messages messages
+                 :prefix pre-code
+                 :suffix suf-code)))
      (starhugger-enable-dumb-grep-context
       (require 'starhugger-grep-context)
       (cond
@@ -1278,7 +1315,7 @@ and a variadic plist."
        (prompt-fn (or prompt-fn #'starhugger--async-prompt))
        (prompt-callback
         (lambda (prompt &rest args)
-          (when (< 0 (length prompt))
+          (when (or (null prompt) (< 0 (length prompt)))
             (starhugger--ensure-inlininng-mode)
             (letrec
                 ((func
@@ -1317,7 +1354,8 @@ and a variadic plist."
                      :force-new (or force-new (< 1 fetch-time))
                      :spin (or starhugger-debug interact)
                      :caller #'starhugger-trigger-suggestion
-                     :backend backend
+                     :backend
+                     backend
                      args))))
               (funcall func 1))))))
     (funcall prompt-fn prompt-callback)))
