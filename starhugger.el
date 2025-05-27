@@ -64,7 +64,7 @@ window of BUFFER-OR-NAME when at the buffer end, if any."
 (cl-defun starthugger--join-strings-no-repeat-separator (components &optional (separator "/"))
   "Join COMPONENTS with SEPARATOR in between, without repeating it.
 Joining [\"a\" \"b\"], [\"a\" \"/b\"], [\"a/\" \"b\"], [\"a/\" \"/b\"]
-all give \"a/b\"."
+all gives \"a/b\"."
   (named-let
       recur
       ((comps (seq-rest components))
@@ -240,26 +240,24 @@ Additionally prevent errors about multi-byte characters."
 Enable this when the return_full_text parameter isn't honored."
   :type 'boolean)
 
+(defun starhugger-post-process-instruct-markdown-code-block (text &rest _)
+  (-let* ((parts (split-string text "^```\\([^`]\\|$\\).*" nil "[ \t\n]?")))
+    (cond
+     ;; A single code block in this format, extract it:
+     ;; {optional talk}\n```.*\n{code block}\n```\n{optional talk}
+     ((= 3 (length parts))
+      (--> (nth 1 parts)
+           ;; If the model doesn't understand and generates MD code block
+           ;; anyway, the preceding spaces are usually redundant
+           (string-trim-left it "[ \t]+")))
+     (:else
+      text))))
+
 (defcustom starhugger-post-process-chain
   `(
     ;; Remove reasoning models's thoughts
     ("\\`[ \t\n\r]*<think>[^z-a]*?</think>[ \t\n\r]*" "")
-    ;; Remove markdown code block markers, as a fallback if the model fails to
-    ;; follow the instruction
-    (,(rx
-       "```"
-       (* not-newline)
-       "\n"
-       (group (+? anything))
-       "\n```"
-       (* (or " " "\t" "\n" "\r"))
-       string-end)
-     "\\1")
-    (,(concat
-       "\\`[ \t\n\r]*```.*\n\\([^z-a]*?\\)[ \t]*\n```"
-       ;; Explanations after a markdown code block
-       "[^z-a]*")
-     "\\1"))
+    starhugger-post-process-instruct-markdown-code-block)
   "List of functions and replace regexes."
   :type '(repeat (choice function (list regexp string))))
 
@@ -626,9 +624,9 @@ prioritized over stopping `:process')."
     starhugger-openai-compat-api-base-completions
     starhugger-ollama-completion-api))
 
-(defun starhugger--post-process (str)
+(defun starhugger--post-process-do (str &optional chain)
   (named-let
-      recur ((retval str) (chain starhugger-post-process-chain))
+      recur ((retval str) (chain (or chain starhugger-post-process-chain)))
     (-let* ((op (car chain)))
       (cond
        ((seq-empty-p chain)
@@ -639,6 +637,13 @@ prioritized over stopping `:process')."
        ((functionp op)
         (recur (funcall op retval) (cdr chain)))))))
 
+(defun starhugger--post-process-make-closure-prefer-local ()
+  (cond
+   ((local-variable-p 'starhugger-post-process-chain) 
+    (-let* ((chain starhugger-post-process-chain))
+      (lambda (str) (starhugger--post-process-do str chain))))
+   (:else #'starhugger--post-process-do)))
+
 (cl-defun starhugger--query-internal (prompt callback &rest args &key display spin backend caller &allow-other-keys)
   "CALLBACK is called with the generated text list and a plist.
 PROMPT is the prompt to use. DISPLAY is whether to display the
@@ -646,12 +651,12 @@ generated text in a buffer. SPIN is whether to show a spinner.
 ARGS are the arguments to pass to the BACKEND (or
 `starhugger-completion-backend-function')"
   (run-hooks 'starhugger-before-request-hook)
-  (-let*
-      ((call-buf (current-buffer))
-       (spin-obj
-        (and spin starhugger-enable-spinner (starhugger--spinner-start)))
-       (backend (or backend starhugger-completion-backend-function))
-       (request-record nil))
+  (-let* ((orig-buf (current-buffer))
+          (spin-obj
+           (and spin starhugger-enable-spinner (starhugger--spinner-start)))
+          (backend (or backend starhugger-completion-backend-function))
+          (post-proc-fn (starhugger--post-process-make-closure-prefer-local))
+          (request-record nil))
     (letrec ((returned
               (apply backend
                      prompt
@@ -660,14 +665,13 @@ ARGS are the arguments to pass to the BACKEND (or
                                &rest cb-args &key error &allow-other-keys)
                         (cl-callf
                             (lambda (lst) (delete request-record lst))
-                            (gethash call-buf (starhugger--running-request-table)
+                            (gethash orig-buf (starhugger--running-request-table)
                                      '()))
                         (when spin-obj
                           (funcall spin-obj))
                         (-let* ((err-str (format "%S" error))
                                 (processed-content-choices
-                                 (-map
-                                  #'starhugger--post-process content-choices)))
+                                 (-map post-proc-fn content-choices)))
                           (starhugger--record-generated
                            prompt
                            content-choices
@@ -681,7 +685,7 @@ ARGS are the arguments to pass to the BACKEND (or
                      args)))
       (setq request-record (append returned `(:caller ,caller)))
       (push
-       request-record (gethash call-buf (starhugger--running-request-table) '()))
+       request-record (gethash orig-buf (starhugger--running-request-table) '()))
       request-record)))
 
 
@@ -992,7 +996,7 @@ versions may use."
 The input format uses <FILL> to mark where content should be inserted.
 
 - Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
-- Do NOT include markdown formatting, code blocks, or any other wrapper
+- Do NOT include markdown formatting, code blocks, or any other wrapper; the markdown code block markers are just for clarify, don't answer with them
 - Do NOT repeat any surrounding text
 - Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
 - Ensure proper indentation and formatting that matches the surrounding code
@@ -1117,7 +1121,7 @@ and a variadic plist."
             (starhugger--get-from-num-or-list
              starhugger-numbers-of-suggestions-to-fetch
              interact)))
-       (caller-buf (current-buffer))
+       (orig-buf (current-buffer))
        (pt0 (point))
        (state (starhugger--suggestion-state))
        (prompt-fn (or prompt-fn #'starhugger--async-prompt))
@@ -1132,9 +1136,9 @@ and a variadic plist."
                      #'starhugger--query-internal
                      prompt
                      (lambda (generated-texts &rest returned-args)
-                       (when (and (buffer-live-p caller-buf)
+                       (when (and (buffer-live-p orig-buf)
                                   (not (plist-get returned-args :error)))
-                         (with-current-buffer caller-buf
+                         (with-current-buffer orig-buf
                            (-let* ((suggt-1st
                                     (-first-item generated-texts)))
                              (starhugger--add-to-suggestion-list
