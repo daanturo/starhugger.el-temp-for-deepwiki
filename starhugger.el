@@ -27,12 +27,16 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'map)
+(require 'project)
 
 (require 'compat)
 (require 'dash)
 (require 's)
 (require 'request)
 
+(defgroup starhugger nil
+  "LLM-powered code completion client."
+  :group 'external)
 
 ;;;; Helpers
 
@@ -65,10 +69,10 @@ all give \"a/b\"."
       recur
       ((comps (seq-rest components))
        (retval
-        (ignore-error '(args-out-of-range)
+        (ignore-error (args-out-of-range)
           (seq-first components))))
     (-let* ((new
-             (ignore-error '(args-out-of-range)
+             (ignore-error (args-out-of-range)
                (seq-first comps)))
             (suf-old (string-suffix-p separator retval))
             (pre-new (string-prefix-p separator new)))
@@ -84,25 +88,36 @@ all give \"a/b\"."
         (recur (seq-rest comps) (concat retval separator new)))))))
 
 (defun starhugger--project-root (&optional dir)
+  "Return the root directory of DIR's project."
   (-some--> (project-current nil dir) (project-root it)))
+
+(defvar starhugger--guess-language-id--cache
+  (make-hash-table :test #'equal))
+(defun starhugger--guess-language-id ()
+  (with-memoization (gethash
+                     major-mode
+                     starhugger--guess-language-id--cache)
+    (cond
+     ((stringp mode-name)
+      (replace-regexp-in-string "[ \t]" "-" (downcase mode-name)))
+     (:else
+      (replace-regexp-in-string
+       "\\(-ts\\)?-mode$" "" (symbol-name major-mode))))))
 
 ;;;; Making requests
 
 (defcustom starhugger-model-id "qwen2.5-coder"
   "The language model's name on selected platform."
-  :group 'starhugger
   :type 'string)
 
 (defcustom starhugger-generated-buffer (format "*%s*" 'starhugger)
   "Buffer name to log parsed responses."
-  :group 'starhugger
   :type 'string)
 
 ;; Admittedly a wrong name
 (defcustom starhugger-max-prompt-length (* 1024 8)
   "Max length of the code in current buffer to send.
 Doesn't count fills tokens and maybe the context."
-  :group 'starhugger
   :type 'natnum)
 
 
@@ -137,7 +152,6 @@ Doesn't count fills tokens and maybe the context."
 
 (defcustom starhugger-enable-spinner t
   "Show spinner when fetching interactively."
-  :group 'starhugger
   :type 'boolean)
 
 ;; WHY isn't this documented?!
@@ -149,7 +163,6 @@ Doesn't count fills tokens and maybe the context."
 It can be a list of two natural numbers: the number of tokens to fetch
 when called automatically and the number of token to fetch when called
 interactively."
-  :group 'starhugger
   :type '(choice natnum (list natnum natnum)))
 
 (defun starhugger--json-serialize (object &rest args)
@@ -225,24 +238,28 @@ Additionally prevent errors about multi-byte characters."
 (defcustom starhugger-strip-prompt-before-insert nil
   "Whether to remove the prompt in the parsed response before inserting.
 Enable this when the return_full_text parameter isn't honored."
-  :group 'starhugger
   :type 'boolean)
 
 (defcustom starhugger-post-process-chain
   `(
+    ;; Remove reasoning models's thoughts
+    ("\\`[ \t\n\r]*<think>[^z-a]*?</think>[ \t\n\r]*" "")
     ;; Remove markdown code block markers, as a fallback if the model fails to
     ;; follow the instruction
     (,(rx
        "```"
-       (*? not-newline)
+       (* not-newline)
        "\n"
-       (group (+ anything))
+       (group (+? anything))
        "\n```"
        (* (or " " "\t" "\n" "\r"))
        string-end)
      "\\1")
-    ;; Remove reasoning models's thoughts
-    ("\\`[ \t\n\r]*<think>[^z-a]*?</think>[ \t\n\r]*" ""))
+    (,(concat
+       "\\`[ \t\n\r]*```.*\n\\([^z-a]*?\\)[ \t]*\n```"
+       ;; Explanations after a markdown code block
+       "[^z-a]*")
+     "\\1"))
   "List of functions and replace regexes."
   :type '(repeat (choice function (list regexp string))))
 
@@ -251,22 +268,22 @@ Enable this when the return_full_text parameter isn't honored."
 Unless just before the buffer end's trailing newlines (if any),
 in that case don't use fill mode.
 
-If set to the symbol 'instruct, starhugger will try to construct a
-prompt that tells the instruction-tuned language model to fill in the
-spot, enable making use of chat models that don't support FIM."
-  :group 'starhugger
+If set to the symbol '`instruct' and appropriate
+`starhugger-completion-backend-function', `starhugger' will try to
+construct a prompt that tells the instruction-tuned language model to
+fill in the spot, enable making use of chat models that don't support
+FIM.  Note that this prompt may not always success.  See also the option
+`starhugger-instruct-build-messages-function' to customize prompting."
   :type '(choice boolean (const instruct)))
 
 (defcustom starhugger-prompt-after-point-fraction (/ 1.0 4)
   "The length fraction that code after point should take in the prompt."
-  :group 'starhugger
   :type 'float)
 
 (defcustom starhugger-retry-temperature-range '(0.0 1.0)
   "The lower and upper bound of random temperature when retrying.
 A single number means just use it without generating.  nil means don't
 set temperature at all."
-  :group 'starhugger
   :type '(list float float))
 
 (defun starhugger--retry-temperature ()
@@ -290,7 +307,6 @@ set temperature at all."
 
 (defcustom starhugger-notify-request-error t
   "Whether to notify if an error was thrown when the request is completed."
-  :group 'starhugger
   :type 'boolean)
 
 (defun starhugger--without-notify-request-error--a (func &rest args)
@@ -323,14 +339,12 @@ See https://github.com/tkf/emacs-request/issues/226."
 (defcustom starhugger-ollama-generate-api-url
   "http://localhost:11434/api/generate"
   "Ollama API's generation endpoint."
-  :group 'starhugger
   :type 'string)
 
 (defcustom starhugger-ollama-additional-parameter-alist
   '((options) (stream . :false))
   "Ollama API's advanced parameters.
 See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
-  :group 'starhugger
   :type 'alist)
 
 (cl-defun starhugger-ollama-completion-api (prompt callback &rest args &key
@@ -402,15 +416,13 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
 (defcustom starhugger-openai-compat-url "http://localhost:11434/v1"
   "Base URL for OpenAI-compatible API.
 See also `starhugger-openai-compat-base-completions-endpoint'"
-  :group 'starhugger
   :type 'string)
 
 (defcustom starhugger-openai-compat-api-key nil
   "API key for authentication at your provider.
 This string must be unibyte, ensure that before dynamically setting
 with (`encode-coding-string' ... \\='utf-8)."
-  :group 'starhugger
-  :type ''string)
+  :type 'string)
 
 (defvar starhugger-openai-compat-base-completions-endpoint "/completions"
   "Base models's completions endpoint of `starhugger-openai-compat-url'.")
@@ -420,18 +432,17 @@ with (`encode-coding-string' ... \\='utf-8)."
 An alist (Info node `(elisp) Association Lists') to be converted to JSON
 with `json-serialize'.  See
 https://platform.openai.com/docs/api-reference/completions/create."
-  :group 'starhugger
   :type 'alist)
 
 (defvar starhugger-openai-compat-chat-completions-endpoint "/chat/completions"
   "Chat models's completions endpoint of `starhugger-openai-compat-url'.")
 
 (defcustom starhugger-openai-compat-chat-completions-parameter-alist '((stream . :false))
-  "Parameters for the /chat/completions endpoint."
-  :group 'starhugger
+  "Parameters for the /chat/completions endpoint.
+See https://platform.openai.com/docs/api-reference/chat/create."
   :type 'alist)
 
-(defun starhugger-openai-compat-api-base-completions
+(cl-defun starhugger-openai-compat-api-base-completions
     (prompt
      callback
      &rest
@@ -514,17 +525,15 @@ https://platform.openai.com/docs/api-reference/completions/create."
        :request-response request-obj))))
 
 (cl-defun starhugger-openai-compat-api-chat-completions
-    (prompt
+    (_prompt
      callback
      &rest
      args
      &key
+     messages
      model
      force-new
      max-new-tokens
-     prefix
-     suffix
-     messages
      &allow-other-keys)
   (-let* ((model (or model starhugger-model-id))
           (url
@@ -611,7 +620,6 @@ be terminate to cancel the request, whose `process-sentinel' can
 be decorated; optionally `:cancel-fn': a function that terminates
 the running request when called, (calling `:cancel-fn' is
 prioritized over stopping `:process')."
-  :group 'starhugger
   :type 'function
   :options
   '(starhugger-openai-compat-api-chat-completions
@@ -691,8 +699,7 @@ ARGS are the arguments to pass to the BACKEND (or
      ;; ends
      :underline nil
      :extend t))
-  "Face for suggestion overlays."
-  :group 'starhugger)
+  "Face for suggestion overlays.")
 
 ;; We may as well use a ring (`make-ring'), but it doesn't have a built-in way
 ;; to modify elements in-place
@@ -705,13 +712,11 @@ Recent suggestions are added to the beginning.")
   "Maximum number of saved suggestions in current buffer.
 Note that this includes all recently fetched suggestions so not
 all of them are relevant all the time."
-  :group 'starhugger
   :type 'natnum)
 
 
 (defcustom starhugger-dismiss-suggestion-after-change t
   "Whether to clear the overlay when text changes and not partially accepted."
-  :group 'starhugger
   :type 'boolean)
 
 (defvar-local starhugger--inline-inhibit-changing-overlay nil)
@@ -757,7 +762,6 @@ The second number is the number of suggestions to fetch when
 
 It can also be a single number, in which case the first number is
 the same as the second number."
-  :group 'starhugger
   :type '(choice natnum (list natnum natnum)))
 
 (defun starhugger--current-overlay-suggestion ()
@@ -942,7 +946,7 @@ will (re-)apply for all."
   "Whether to trim spaces in the prompt.
 Trim space before the prompt, and in fill mode, spaces after the
 prompt."
-  :group 'starhugger :type 'boolean)
+  :type 'boolean)
 
 (defun starhugger--no-fill-prompt ()
   (-let* ((pt-cur (point)))
@@ -963,24 +967,16 @@ prompt."
      (:else
       placeholder))))
 
-(defun starhugger-instruct-build-messages-default
-    (prefix suffix &optional context-list)
+(cl-defun starhugger-instruct-build-messages-default (prefix suffix &optional other-context &key language &allow-other-keys)
+  "Return an OpenAI-compatible /chat/completions \"messages\" parameter.
+User prompt is constructed from PREFIX, SUFFIX and OTHER-CONTEXT.
+LANGUAGE: a short string is used to annotate the task, it defaults to the current mode's .  For
+compatibility, the function accepts any keyword arguments that future
+versions may use."
   (-let*
-      ((merged-context
-        (cond
-         (context-list
-          (-->
-           context-list
-           (-map
-            (-lambda ((filename snippet . _))
-              (format "%s\n```\n%s\n```" filename snippet))
-            it)
-           (string-join it "\n\n") (format "\n%s\n" it)))
-         (:else
-          "")))
-       (fill-placeholder
+      ((fill-placeholder
         (starhugger--instruct-unique-fill-placeholder
-         (concat merged-context prefix suffix)))
+         (concat other-context prefix suffix)))
        (prj-root (starhugger--project-root))
        (curr-filename
         (cond
@@ -988,27 +984,27 @@ prompt."
           (file-relative-name (file-truename buffer-file-name)
                               (file-truename prj-root)))
          (buffer-file-name
-          (file-name-nondirectory buffer-file-name))
-         (:else
-          "")))
+          (file-name-nondirectory buffer-file-name))))
+       (language (or language (starhugger--guess-language-id)))
        (system-prompt
         (-->
          "You are a code/text completion expert. Your task is to fill in missing code or text.
 The input format uses <FILL> to mark where content should be inserted.
 
-- Provide ONLY the replacement text/code for the <FILL> placeholder
+- Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
 - Do NOT include markdown formatting, code blocks, or any other wrapper
-- Do NOT repeat the surrounding text
-- Include comments when needed, also if you want to add remarks write them as comments
+- Do NOT repeat any surrounding text
+- Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
 - Ensure proper indentation and formatting that matches the surrounding code
-- The fill may be partial line content, complete statements, or multiple lines"
+- The fill may fit in just a part of a line, or composed of a single or multiple lines
+- If the fill is part of an uncompleted function, just try to fill within that function without writing another function outside of it"
          (if (equal "<FILL>" fill-placeholder)
              it
            (string-replace "<FILL>" fill-placeholder it))))
        (user-prompt
         (-->
          "%s\n%s
-```
+```%s
 %s
 ```\n
 The replacement for <FILL> is:"
@@ -1016,15 +1012,19 @@ The replacement for <FILL> is:"
              it
            (string-replace "<FILL>" fill-placeholder it))
          (format it
-                 merged-context
-                 curr-filename
-                 (concat prefix fill-placeholder suffix)))))
+                 (or other-context "")
+                 (or curr-filename "")
+                 (or language "")
+                 (concat prefix fill-placeholder suffix))
+         (string-trim it))))
     `[((role . "system") (content . ,system-prompt))
       ((role . "user") (content . ,user-prompt))]))
 
 (defcustom starhugger-instruct-build-messages-function
   #'starhugger-instruct-build-messages-default
-  "Function to construct the prompt when `starhugger-fill-in-the-middle' is 'instruct."
+  "Function to construct \"messages\" when using an instruction-tuned model.
+See `starhugger-instruct-build-messages-default' for compatible
+arguments and return value."
   :type 'function)
 
 (defun starhugger--prompt-build-components ()
@@ -1252,7 +1252,6 @@ cancel unfinished fetches."
 
 (defcustom starhugger-trigger-suggestion-after-accepting t
   "Whether to continue triggering suggestion after accepting."
-  :group 'starhugger
   :type 'boolean)
 
 (defun starhugger-turn-off-completion-in-region-mode ()
@@ -1394,12 +1393,10 @@ Note that the number of suggestions are limited by
 Note that the time taken to fetch isn' instantaneous, so we have
 to wait more after this unless the suggestion(s) is already
 cached, for the suggestion to appear."
-  :group 'starhugger
   :type 'float)
 
 (defcustom starhugger-auto-dismiss-when-move-out t
   "Whether to dismiss suggestion when moving point outside."
-  :group 'starhugger
   :type 'boolean)
 
 (defvar-local starhugger--auto-timer nil)
