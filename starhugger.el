@@ -1,4 +1,4 @@
-;;; starhugger.el --- Hugging Face/AI-powered text & code completion client  -*- lexical-binding: t; -*-
+;;; starhugger.el --- LLM/AI-powered text & code completion client  -*- lexical-binding: t; -*-
 
 ;; Version: 0.7.0-git
 ;; Package-Requires: ((emacs "28.2") (compat "29.1.4.0") (dash "2.18.0") (s "1.13.1") (spinner "1.7.4") (request "0.3.2"))
@@ -20,7 +20,7 @@
 
 ;;; Commentary:
 
-;; Hugging Face/AI-powered text & code completion client (unofficial).
+;; LLM/AI-powered text & code completion client.
 
 ;;; Code:
 
@@ -88,99 +88,17 @@ all give \"a/b\"."
 
 ;;;; Making requests
 
-(defvar starhugger--model-config-presets
-  '(
-    ;; the original Starcoder
-    ("\\bStarcoder\\b" .
-     (:fill-tokens
-      ("<fim_prefix>" "<fim_suffix>" "<fim_middle>")
-      :stop-tokens ("<|endoftext|>")
-      :family starcoder))
-    ("\\bStarcoder[0-9]+\\b" .
-     (:fill-tokens
-      ("<fim_prefix>" "<fim_suffix>" "<fim_middle>")
-      :stop-tokens
-      ("<|endoftext|>"
-       "<file_sep>" ; https://github.com/bigcode-project/starcoder2/issues/10#issuecomment-1979014959
-       )
-      :file-separator "<file_sep>"
-      :family starcoder))
-    ("\\bCode[^a-z]?Gemma\\b" .
-     (:fill-tokens
-      ("<|fim_prefix|>" "<|fim_suffix|>" "<|fim_middle|>")
-      :stop-tokens ()
-      :file-separator "<|file_separator|>"
-      :family code-gemma))
-    ("\\bDeepseek\\b" .
-     (:fill-tokens
-      ("<｜fim▁begin｜>" "<｜fim▁hole｜>" "<｜fim▁end｜>")
-      :stop-tokens ("<｜eos▁token｜>")
-      :family deepseek))
-    ("\\bCode[^a-z]?Llama\\b" .
-     (:fill-tokens
-      ("<PRE>" "<SUF>" "<MID>")
-      :stop-tokens ("<|endoftext|>" "<EOT>")
-      :family code-llama))
-    ("\\bQwen[.0-9]*-?Coder\\b" .
-     ;; https://arxiv.org/abs/2409.12186
-     (:fill-tokens
-      ("<|fim_prefix|>" "<|fim_suffix|>" "<|fim_middle|>")
-      :stop-tokens ("<|endoftext|>")
-      :file-separator "<|file_sep|>"
-      :family qwen-coder)))
-  "Refer to https://github.com/huggingface/huggingface-vscode/blob/f044ff02f08e49a5da9849f34235fece4a32535b/src/configTemplates.ts#L17.")
-
-(defvar starhugger-model-id)
-(defun starhugger--get-model-preset (&optional model-id)
-  (-let* ((model-id (or model-id starhugger-model-id)))
-    (alist-get model-id starhugger--model-config-presets
-               nil nil
-               (lambda (alist-car _)
-                 (dlet ((case-fold-search t))
-                   (string-match
-                    alist-car
-                    ;; ignore organization name
-                    (replace-regexp-in-string "^.*?/" "" model-id)))))))
-
-(defun starhugger--model-id-set-fn (sym val)
-  (set-default-toplevel-value sym val)
-  (save-match-data
-    (-when-let* ((preset (starhugger--get-model-preset val)))
-      (setq starhugger-fill-tokens (map-nested-elt preset '(:fill-tokens)))
-      (setq starhugger-stop-tokens (map-nested-elt preset '(:stop-tokens))))))
-
 (defcustom starhugger-model-id "qwen2.5-coder"
-  "The language model's name on selected platform.
-Note that starhugger currently only supports base/non-instruction
-models.
-
-If the platform doesn't support suffix requests and you want to use one
-of the limited configuration presets, set this before loading
-`starhugger.el' or use `setopt' (or Emacs's customization
-interface). Else if you use a custom model, configure
-`starhugger-fill-tokens', `starhugger-stop-tokens' manually (no need to
-customize this variable if they are set that way)."
-  :group 'starhugger
-  :type 'string
-  :set #'starhugger--model-id-set-fn)
-
-(defcustom starhugger-stop-tokens nil
-  "End of sentence tokens."
+  "The language model's name on selected platform."
   :group 'starhugger
   :type 'string)
-
-(defcustom starhugger-fill-tokens nil
-  "List of 3 tokens to use for `starhugger-fill-in-the-middle'.
-See
-https://github.com/huggingface/huggingface-vscode/blob/73818334f4939c2f19480a404f74944a47933a12/src/runCompletion.ts#L66"
-  :group 'starhugger
-  :type '(list string string string))
 
 (defcustom starhugger-generated-buffer (format "*%s*" 'starhugger)
   "Buffer name to log parsed responses."
   :group 'starhugger
   :type 'string)
 
+;; Admittedly a wrong name
 (defcustom starhugger-max-prompt-length (* 1024 8)
   "Max length of the code in current buffer to send.
 Doesn't count fills tokens and maybe the context."
@@ -228,10 +146,9 @@ Doesn't count fills tokens and maybe the context."
 
 (defcustom starhugger-max-new-tokens nil
   "When a number, set it to max_new_tokens.
-It can be a list of two natural numbers: the number of tokens to
-fetch when called automatically and the number of token to fetch
-when called interactively. See also
-`starhugger-hugging-face-additional-data-alist'."
+It can be a list of two natural numbers: the number of tokens to fetch
+when called automatically and the number of token to fetch when called
+interactively."
   :group 'starhugger
   :type '(choice natnum (list natnum natnum)))
 
@@ -311,35 +228,28 @@ Enable this when the return_full_text parameter isn't honored."
   :group 'starhugger
   :type 'boolean)
 
-(defvar starhugger-stop-token nil
-  "Obsolete, customize `starhugger-stop-tokens' instead.")
-
-(defcustom starhugger-chop-stop-token t
-  "Whether to remove `starhugger-stop-tokens' before inserting."
-  :group 'starhugger
-  :type 'boolean)
-
 (defcustom starhugger-post-process-chain
   `(
-    ;; "```.*\n\([^z-a]+\)\n```[ \t\n\r]*\\'"
+    ;; Remove markdown code block markers, as a fallback if the model fails to
+    ;; follow the instruction
     (,(rx
        "```"
-       (* not-newline)
+       (*? not-newline)
        "\n"
        (group (+ anything))
        "\n```"
        (* (or " " "\t" "\n" "\r"))
        string-end)
      "\\1")
-    ("<think>[^z-a]*</think>[ \t\n\r]*" ""))
+    ;; Remove reasoning models's thoughts
+    ("\\`[ \t\n\r]*<think>[^z-a]*?</think>[ \t\n\r]*" ""))
   "List of functions and replace regexes."
   :type '(repeat (choice function (list regexp string))))
 
 (defcustom starhugger-fill-in-the-middle t
   "Enable using code from both before and after point as prompt.
 Unless just before the buffer end's trailing newlines (if any),
-in that case don't use fill mode. See `starhugger-fill-tokens'
-for the relevant tokens.
+in that case don't use fill mode.
 
 If set to the symbol 'instruct, starhugger will try to construct a
 prompt that tells the instruction-tuned language model to fill in the
@@ -354,21 +264,8 @@ spot, enable making use of chat models that don't support FIM."
 
 (defcustom starhugger-retry-temperature-range '(0.0 1.0)
   "The lower and upper bound of random temperature when retrying.
-A single number means just use it without generating. nil means
-don't set temperature at all. Set this to a list of numbers when
-the model doesn't honor use_cache = false.
-
-To test if the model honors use_cache = false, run this twice in
-the shell:
-
-curl https://api-inference.huggingface.co/models/bigcode/starcoder \\
-        -X POST \\
-        -H \"Content-Type: application/json\" \\
-        -d \\='{\"options\": {\"use_cache\": false},\
- \"parameters\": {\"num_return_sequences\": 2}, \"inputs\": \"ping!\"}\\='
-
-It should return 2 different responses, each with 2
-\"generated_text\"."
+A single number means just use it without generating.  nil means don't
+set temperature at all."
   :group 'starhugger
   :type '(list float float))
 
@@ -450,8 +347,6 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
                ,@(and force-new
                       starhugger-retry-temperature-range
                       `((temperature . ,(starhugger--retry-temperature))))
-               ,@(and starhugger-chop-stop-token
-                      `((stop . [,@starhugger-stop-tokens])))
                ,@(alist-get 'options starhugger-ollama-additional-parameter-alist))
               (stream . :false)
               ,@starhugger-ollama-additional-parameter-alist))))
@@ -723,22 +618,6 @@ prioritized over stopping `:process')."
     starhugger-openai-compat-api-base-completions
     starhugger-ollama-completion-api))
 
-(defun starhugger--trim-from-stop-tokens (str &optional stop-token-lst)
-  (named-let
-      recur
-      ((stop-token-lst (or stop-token-lst starhugger-stop-tokens))
-       ;; I think literal `string-search' is faster than `replace-regexp-in-string'?
-       (retval str))
-    (-let* ((stop-token (car stop-token-lst))
-            (found-end-pos (and stop-token (string-search stop-token retval))))
-      (cond
-       ((null stop-token)
-        retval)
-       (found-end-pos
-        (recur (cdr stop-token-lst) (substring retval 0 found-end-pos)))
-       (:else
-        (recur (cdr stop-token-lst) retval))))))
-
 (defun starhugger--post-process (str)
   (named-let
       recur ((retval str) (chain starhugger-post-process-chain))
@@ -764,18 +643,12 @@ ARGS are the arguments to pass to the BACKEND (or
        (spin-obj
         (and spin starhugger-enable-spinner (starhugger--spinner-start)))
        (backend (or backend starhugger-completion-backend-function))
-       ;; Haven't tested with HuggingFace so always remove just to be safe,
-       ;; Ollama allows supplying stop sequences in the request:
-       ;; https://github.com/ollama/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values
-       (manual-trim-stop-tokens
-        (and starhugger-chop-stop-token
-             (not (member backend '(starhugger-ollama-completion-api)))))
        (request-record nil))
     (letrec ((returned
               (apply backend
                      prompt
                      (cl-function
-                      (lambda (gen-texts
+                      (lambda (content-choices
                                &rest cb-args &key error &allow-other-keys)
                         (cl-callf
                             (lambda (lst) (delete request-record lst))
@@ -784,24 +657,19 @@ ARGS are the arguments to pass to the BACKEND (or
                         (when spin-obj
                           (funcall spin-obj))
                         (-let* ((err-str (format "%S" error))
-                                (gen-texts-post-process
-                                 (-->
-                                  gen-texts
-                                  (if manual-trim-stop-tokens
-                                      (-map
-                                       #'starhugger--trim-from-stop-tokens it)
-                                    it)
-                                  (-map #'starhugger--post-process it))))
+                                (processed-content-choices
+                                 (-map
+                                  #'starhugger--post-process content-choices)))
                           (starhugger--record-generated
                            prompt
-                           gen-texts
+                           content-choices
                            :parameters args
                            :other-info cb-args
                            :backend backend
                            :display display)
                           (when (and error starhugger-notify-request-error)
                             (message "`starhugger' response error: %s" err-str))
-                          (apply callback gen-texts-post-process cb-args))))
+                          (apply callback processed-content-choices cb-args))))
                      args)))
       (setq request-record (append returned `(:caller ,caller)))
       (push
@@ -1085,14 +953,15 @@ prompt."
          (string-trim-left it)
        it))))
 
-(defun starhugger--instruct-unique-fill-token (content)
+(defun starhugger--instruct-unique-fill-placeholder (content)
   (named-let
-      recur ((token "<FILL>"))
+      recur ((placeholder "<FILL>"))
+    ;; Repeat <FILL-FILL-...> as needed
     (cond
-     ((string-search token content)
-      (recur (concat "<FILL-" (substring token 2))))
+     ((string-search placeholder content)
+      (recur (concat "<FILL-" (substring placeholder 2))))
      (:else
-      token))))
+      placeholder))))
 
 (defun starhugger-instruct-build-messages-default
     (prefix suffix &optional context-list)
@@ -1109,8 +978,8 @@ prompt."
            (string-join it "\n\n") (format "\n%s\n" it)))
          (:else
           "")))
-       (fill-token
-        (starhugger--instruct-unique-fill-token
+       (fill-placeholder
+        (starhugger--instruct-unique-fill-placeholder
          (concat merged-context prefix suffix)))
        (prj-root (starhugger--project-root))
        (curr-filename
@@ -1127,31 +996,29 @@ prompt."
          "You are a code/text completion expert. Your task is to fill in missing code or text.
 The input format uses <FILL> to mark where content should be inserted.
 
-- Provide ONLY the replacement text/code for the <FILL> token
+- Provide ONLY the replacement text/code for the <FILL> placeholder
 - Do NOT include markdown formatting, code blocks, or any other wrapper
 - Do NOT repeat the surrounding text
 - Include comments when needed, also if you want to add remarks write them as comments
 - Ensure proper indentation and formatting that matches the surrounding code
 - The fill may be partial line content, complete statements, or multiple lines"
-         (if (equal "<FILL>" fill-token)
+         (if (equal "<FILL>" fill-placeholder)
              it
-           (string-replace "<FILL>" fill-token it))))
+           (string-replace "<FILL>" fill-placeholder it))))
        (user-prompt
         (-->
-         "%s
-%s
+         "%s\n%s
 ```
 %s
-```
-
+```\n
 The replacement for <FILL> is:"
-         (if (equal "<FILL>" fill-token)
+         (if (equal "<FILL>" fill-placeholder)
              it
-           (string-replace "<FILL>" fill-token it))
+           (string-replace "<FILL>" fill-placeholder it))
          (format it
                  merged-context
                  curr-filename
-                 (concat prefix fill-token suffix)))))
+                 (concat prefix fill-placeholder suffix)))))
     `[((role . "system") (content . ,system-prompt))
       ((role . "user") (content . ,user-prompt))]))
 
@@ -1162,7 +1029,6 @@ The replacement for <FILL> is:"
 
 (defun starhugger--prompt-build-components ()
   (if (and starhugger-fill-in-the-middle
-           starhugger-fill-tokens
            ;; don't use fill mode when at trailing newlines
            (not (looking-at-p "\n*\\'")))
       (-let* ((intend-suf-len
@@ -1203,55 +1069,9 @@ The replacement for <FILL> is:"
         (vector pre-str suf-str))
     (vector (starhugger--no-fill-prompt) nil)))
 
-(defcustom starhugger-enable-dumb-grep-context nil
-  "Whether to inject a dumb grep-based project-wide context to the prompt.
-Experimental! This requires ripgrep and python3 as hard
-dependencies. Also remember to reduce
-`starhugger-max-prompt-length' if you enable this."
-  :group 'starhugger
-  :type 'boolean)
-
-(cl-defun starhugger--fim-concatenate (pre-code
-                                       &optional
-                                       suf-code
-                                       &key
-                                       pre-fim-prefix
-                                       suf-fim-prefix
-                                       suf-fim-suffix
-                                       fim-tokens)
-  (-let* (((pre-token mid-token suf-token)
-           (and suf-code ; when no code after point, let fill tokens be nil
-                (or fim-tokens starhugger-fill-tokens))))
-    (concat
-     pre-fim-prefix pre-token suf-fim-prefix ;
-     pre-code mid-token suf-code ;
-     suf-token suf-fim-suffix)))
-
-(declare-function starhugger-grep-context--prefix-comments
-                  "starhugger-grep-context")
-(declare-function starhugger-grep-context--file-sep-before-prefix "starhugger-grep-context")
-
 (defun starhugger--async-prompt (callback)
   "CALLBACK is called with the constructed prompt."
-  (-let* (([pre-code suf-code] (starhugger--prompt-build-components))
-          ((pre-token mid-token suf-token) starhugger-fill-tokens)
-          (preset (starhugger--get-model-preset))
-          (file-sep (map-nested-elt preset '(:file-separator)))
-          (grep-ctx-callback
-           (lambda (dumb-context)
-             (-let* ((prompt
-                      (cond
-                       (suf-code
-                        (concat
-                         pre-token
-                         dumb-context
-                         pre-code
-                         mid-token
-                         suf-code
-                         suf-token))
-                       (t
-                        (concat dumb-context pre-code)))))
-               (funcall callback prompt)))))
+  (-let* (([pre-code suf-code] (starhugger--prompt-build-components)))
     (cond
      ((member starhugger-fill-in-the-middle '(instruct))
       (-let* ((messages
@@ -1263,20 +1083,8 @@ dependencies. Also remember to reduce
                  :messages messages
                  :prefix pre-code
                  :suffix suf-code)))
-     (starhugger-enable-dumb-grep-context
-      (require 'starhugger-grep-context)
-      (cond
-       ((and file-sep)
-        (starhugger-grep-context--file-sep-before-prefix
-         callback pre-code suf-code file-sep))
-       (:else
-        (starhugger-grep-context--prefix-comments
-         grep-ctx-callback pre-code suf-code))))
      (:else
-      (funcall callback
-               (starhugger--fim-concatenate pre-code suf-code)
-               :prefix pre-code
-               :suffix suf-code)))))
+      (funcall callback pre-code :prefix pre-code :suffix suf-code)))))
 
 (defun starhugger--get-from-num-or-list (num-or-list &optional idx)
   (cond
@@ -1653,81 +1461,6 @@ cached, for the suggestion to appear."
       (remove-hook 'after-change-functions #'starhugger--auto-after-change-h t))))
 
 ;;;; Other commands
-
-(defcustom starhugger-send-max-new-tokens 256
-  "\"max_new_tokens\" for `starhugger-send'."
-  :group 'starhugger
-  :type 'natnum)
-
-;;;###autoload
-(defun starhugger-send (prompt &optional force-new)
-  "Send PROMPT to the model without any contexts and display the answer.
-Note this command is just a proof of concept, unlike a proper
-chatbot, there are no contexts (including previous inputs) taken
-into consideration.
-
-Non-nil FORCE-NEW (interactively, prefix argument): try to force
-a new answer."
-  (interactive (list
-                (read-string "Input: "
-                             (and (use-region-p)
-                                  (buffer-substring-no-properties
-                                   (region-beginning) (region-end))))
-                current-prefix-arg))
-  (starhugger--query-internal
-   prompt
-   (lambda (&rest _)
-     (with-selected-window (get-buffer-window starhugger-generated-buffer t)
-       (goto-char (point-max))
-       (search-backward (concat starhugger--record-heading-beg "INPUT"))
-       (recenter 0)))
-   :max-new-tokens starhugger-send-max-new-tokens
-   :force-new force-new
-   :caller #'starhugger-send
-   :display t
-   :spin t))
-
-(defun starhugger--suggest-git-commit-message-prompt-fn (callback)
-  (-let*
-      ((cmd-args '("git" "--no-pager" "diff" "--cached"))
-       (outbuf
-        (generate-new-buffer-name
-         " starhugger--suggest-git-commit-message-prompt-fn"))
-       (sentinel
-        (lambda (proc _event)
-          (with-current-buffer outbuf
-            (-let* ((exit-code (process-exit-status proc))
-                    (proc-output
-                     (buffer-substring-no-properties (point-min) (point-max))))
-              (if (= 0 exit-code)
-                  (-let*
-                      ((prompt
-                        (format
-                         ;; "%s<commit_msg>"
-                         "`git diff --cached`'s output:\n```\n%s\n```\nSuggested commit message:"
-                         proc-output)))
-                    (funcall callback prompt))
-                (message "`starhugger:' %S exited with code: %s, output:\n%s"
-                         cmd-args
-                         exit-code
-                         proc-output))))
-          (kill-buffer outbuf)))
-       (proc
-        (apply #'start-process
-               "starhugger--suggest-git-commit-message-prompt-fn"
-               outbuf
-               cmd-args)))
-    (set-process-sentinel proc sentinel)))
-
-;;;###autoload
-(defun starhugger-suggest-git-commit-message ()
-  (interactive)
-  (starhugger-trigger-suggestion
-   :interact t
-   :force-new starhugger-inlining-mode
-   :max-new-tokens 256
-   :prompt-fn #'starhugger--suggest-git-commit-message-prompt-fn))
-
 
 ;;; starhugger.el ends here
 
