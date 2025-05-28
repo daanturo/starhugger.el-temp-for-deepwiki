@@ -1,9 +1,9 @@
 [[https://melpa.org/#/starhugger][file:https://melpa.org/packages/starhugger-badge.svg]] [[https://stable.melpa.org/#/starhugger][file:https://stable.melpa.org/packages/starhugger-badge.svg]]
 
 
-- AI-powered text & code completion client.
+- LLM/AI-powered text & code completion client.
 
-Currently supported backends: [[https://github.com/ollama/ollama][Ollama]], [[https://huggingface.co/docs/api-inference/tasks/text-generation][Hugging Face's Inference API]].
+Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]], [[https://github.com/ollama/ollama][Ollama]].
 
 - [[https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979][Demo]]:
 https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979
@@ -11,6 +11,12 @@ https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a81
 - Repository: [[https://gitlab.com/daanturo/starhugger.el]]
 
 (Maybe not up to date) Mirror: [[https://github.com/daanturo/starhugger.el]]
+
+* Breaking change!
+
+The old Hugging text inference backend was removed, including manual FIM prompt construction.
+
+Use an OpenAI-compatible API provider (default for now) instead.
 
 * Installation
 
@@ -31,31 +37,28 @@ Of if you want to install from source, add one of the following to your configur
 
 ;; elpaca.el
 (elpaca (starhugger :repo "https://gitlab.com/daanturo/starhugger.el" :files (:defaults "*.py")))
-
 #+end_src
 
 Or any package manager of your choice.
 
 * Usage
 
-** Primary commands
-
-- Previewing overlay: ~starhugger-trigger-suggestion~ to display the suggestion.
-
-~M-x~ ~starhugger-show-next-suggestion~ and ~starhugger-show-prev-suggestion~ to cycle suggestions.
-
-~M-x~ ~starhugger-accept-suggestion~ to insert current suggestion.
-
-~starhugger-dismiss-suggestion~ (bound to =C-g= by default when showing) to cancel.
-
-There is also ~starhugger-auto-mode~ (non-global minor mode), but take note of its usage for the Hugging Face text inference backend because of the limit rate.
-
-
 ** Example configuration
 
+By default, starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the base URL and the corresponding endpoint.
+
+The "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/chat/completions~ doesn't.
+
 #+begin_src elisp
-;; Optionally use another model, it's best to be set before loading this package, or use Emacs 29+ `setopt'
-(setq starhugger-model-id "codellama")
+;; Example: a Hugging Face Inference provider
+(setq starhugger-openai-compat-url "https://router.huggingface.co/nebius/v1")
+
+(setq starhugger-openai-compat-base-completions-endpoint "/completions") ; The default, if the provider differs set it accordingly
+(setq starhugger-completion-backend-function #'starhugger-openai-compat-api-base-completions) ; The current default, use it for FIM models
+
+;; The language model's unique on the selected provider, remember this should be
+;; a base (not instruction-tuned/chat) model that supports FIM
+(setq starhugger-model-id "Qwen/Qwen2.5-Coder-7B-fast")
 
 (global-set-key (kbd "M-\\") #'starhugger-trigger-suggestion)
 
@@ -67,7 +70,24 @@ There is also ~starhugger-auto-mode~ (non-global minor mode), but take note of i
   (define-key starhugger-inlining-mode-map (kbd "M-f") (starhugger-inline-menu-item #'starhugger-accept-suggestion-by-word)))
 #+end_src
 
-Additional settings:
+
+*Use instruction-tuned models*
+
+Since FIM-trained models are limited in number, and the majority of released models are instruction-tuned, starhugger also supports chat models via prompting and post-processing.  But this is not perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.
+
+#+begin_src elisp
+(setq starhugger-fill-in-the-middle 'instruct) ; Must be set to prepare a suitable prompt for the chat model
+(setq starhugger-completion-backend-function #'starhugger-openai-compat-api-chat-completions)
+
+(setq starhugger-openai-compat-url "http://localhost:11434/v1") ; The current default: Ollama's OpenAI-Compatible API
+(setq starhugger-openai-compat-chat-completions-endpoint "/chat/completions") ; Set appropriately for the provider
+
+;; Any chat models
+(setq starhugger-model-id "gemma3:12b")
+#+end_src
+
+
+*Additional settings*
 
 #+begin_src elisp
 ;; For evil users, dismiss after pressing ESC twice
@@ -109,21 +129,21 @@ Additional settings:
 (add-hook 'starhugger-inlining-mode-hook #'my-starhugger-inlining-mode-h)
 #+end_src
 
+** Primary commands
 
+- Previewing overlay: ~starhugger-trigger-suggestion~ to display the suggestion.
+
+~M-x~ ~starhugger-show-next-suggestion~ and ~starhugger-show-prev-suggestion~ to cycle suggestions.
+
+~M-x~ ~starhugger-accept-suggestion~ to insert current suggestion.
+
+~starhugger-dismiss-suggestion~ (bound to =C-g= by default when showing) to cancel.
+
+There is also ~starhugger-auto-mode~ (non-global minor mode), but take note of its usage for non-local providers because of their limit rates and/or charging fees.
 
 ** Notes
 
-
-When using the Hugging Face text inference backend, remember to set ~starhugger-hugging-face-api-token~ (from [[https://huggingface.co/settings/tokens]]), otherwise you may easily get hit by the limit rate.
-
-
 *** Known quirks
-
-From the model ([[https://huggingface.co/bigcode/starcoder]]):
-
-- Doesn't use ~num_return_sequences~ ([[https://huggingface.co/docs/api-inference/detailed_parameters#text-generation-task][detailed_parameters]]) to return multiple responses, workaround by making multiple requests.
-
-- Doesn't use ~use_cache~, current workaround is forcing a different response via randomizing ~temperature~.
 
 Emacs overlays are used under the hood to display inline suggestion, there are some shortcomings with this approach:
 
@@ -135,13 +155,7 @@ Emacs overlays are used under the hood to display inline suggestion, there are s
 
 * TODO
 
-- [x] Support setting parameters at [[https://huggingface.co/docs/api-inference/detailed_parameters#text-generation-task]].
-
 - [x] VSCode-like previewing overlays: take after [[https://github.com/zerolfx/copilot.el]].
-
-- [x] Let ~starhugger-trigger-suggestion~ fetch about 3 suggestions to quickly cycle.
-
-- [x] Fill-in-the-middle support  [[https://github.com/huggingface/huggingface-vscode]]: <fim_prefix>〈code before〉<fim_suffix>〈code after〉<fim_middle>.
 
 - [ ] More robust and reliable method to show a different suggestion.
 
@@ -152,6 +166,4 @@ Emacs overlays are used under the hood to display inline suggestion, there are s
 
 - [ ] Find a way to take other files into account [[https://thakkarparth007.github.io/copilot-explorer/posts/copilot-internals.html][Copilot Internals | thakkarparth007.github.io]], or a RAG system.
 
-- [x] Separate frontend (inline suggestion interface) and backend (the text completion provider), and allow multiple backends, not just Hugging Face's inference API.
-
-- [ ] With [[https://github.com/milanglacier/minuet-ai.el][prompt engineering]], allow making use of conversational models, not just limited to FIM-supported coding ones.
+- [-] With [[https://github.com/milanglacier/minuet-ai.el][prompt engineering]], allow making use of conversational models, not just limited to FIM-supported coding ones.

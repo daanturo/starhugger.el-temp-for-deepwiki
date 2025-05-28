@@ -88,7 +88,8 @@ all gives \"a/b\"."
         (recur (seq-rest comps) (concat retval separator new)))))))
 
 (defun starhugger--project-root (&optional dir)
-  "Return the root directory of DIR's project."
+  "Return the root directory of DIR (defaults to current directory)'s project.
+Return nil if not found."
   (-some--> (project-current nil dir) (project-root it)))
 
 (defvar starhugger--guess-language-id--cache
@@ -104,9 +105,18 @@ all gives \"a/b\"."
       (replace-regexp-in-string
        "\\(-ts\\)?-mode$" "" (symbol-name major-mode))))))
 
+(defmacro my-with-live-buffer-or-current (buffer &rest body)
+  "If BUFFER is live, execute BODY in it, else in current buffer."
+  (declare (debug t) (indent defun))
+  `(if (buffer-live-p ,buffer)
+       (with-current-buffer ,buffer
+         ,@body)
+     (progn
+       ,@body)))
+
 ;;;; Making requests
 
-(defcustom starhugger-model-id "qwen2.5-coder"
+(defcustom starhugger-model-id "qwen2.5-coder:7b-base"
   "The language model's name on selected platform."
   :type 'string)
 
@@ -120,6 +130,7 @@ all gives \"a/b\"."
 Doesn't count fills tokens and maybe the context."
   :type 'natnum)
 
+;; TODO: logging is currently a mess, tidy and make them useful
 
 (defvar starhugger--log-buffer (format " *%s-log*" 'starhugger)
   "Buffer name to log things, hidden by default.")
@@ -258,24 +269,27 @@ Enable this when the return_full_text parameter isn't honored."
     ;; Remove reasoning models's thoughts
     ("\\`[ \t\n\r]*<think>[^z-a]*?</think>[ \t\n\r]*" "")
     starhugger-post-process-instruct-markdown-code-block)
-  "List of functions and replace regexes."
+  "List of post-processing steps for model responses.
+Each element can be:
+- A variadic function whose arguments are (generated-text &rest _) and returns
+  the processed text.
+- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments."
   :type '(repeat (choice function (list regexp string))))
 
 (defcustom starhugger-fill-in-the-middle t
   "Enable using code from both before and after point as prompt.
-Unless just before the buffer end's trailing newlines (if any),
-in that case don't use fill mode.
 
-If set to the symbol '`instruct' and appropriate
-`starhugger-completion-backend-function', `starhugger' will try to
-construct a prompt that tells the instruction-tuned language model to
-fill in the spot, enable making use of chat models that don't support
-FIM.  Note that this prompt may not always success.  See also the option
-`starhugger-instruct-build-messages-function' to customize prompting."
+If set to the symbol '`instruct' and
+`starhugger-completion-backend-function', is appropriate, `starhugger'
+will try to construct a prompt that tells the instruction-tuned language
+model to fill in the spot, enable making use of chat models that don't
+support FIM.  Note that this prompt may not always success.  See also
+the option `starhugger-instruct-make-messages-prompt-function' to customize
+prompting."
   :type '(choice boolean (const instruct)))
 
 (defcustom starhugger-prompt-after-point-fraction (/ 1.0 4)
-  "The length fraction that code after point should take in the prompt."
+  "The length fraction that code after point (suffix) should take."
   :type 'float)
 
 (defcustom starhugger-retry-temperature-range '(0.0 1.0)
@@ -319,15 +333,21 @@ set temperature at all."
    (:else
     (apply fn proc event args))))
 
-(defun starhugger--request-el-request (url &rest settings)
+(cl-defun starhugger--request-el-request (url &rest settings &key type parser error &allow-other-keys)
   "Wrapper around (`request' URL @SETTINGS) that silence errors when aborting.
 See https://github.com/tkf/emacs-request/issues/226."
   (declare (indent defun))
-  (-let* ((req (apply #'request url settings)))
-    (add-function :around
-                  (process-sentinel
-                   (get-buffer-process (request-response--buffer req)))
-                  #'starhugger--request-el--silent-sentinel-a)
+  (-let* ((req
+           (apply #'request
+                  url
+                  :type (or type "POST")
+                  :parser
+                  (or parser (lambda () (json-parse-buffer :object-type 'alist)))
+                  :error (or error #'ignore) settings)))
+    (add-function
+     :around
+     (process-sentinel (get-buffer-process (request-response--buffer req)))
+     #'starhugger--request-el--silent-sentinel-a)
     req))
 
 ;;;;; Backends
@@ -367,9 +387,7 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
     (-let* ((request-obj
              (starhugger--request-el-request
                starhugger-ollama-generate-api-url
-               :type "POST"
                :data sending-data
-               :error #'ignore
                :complete
                (cl-function
                 (lambda (&rest
@@ -384,7 +402,6 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
                                '()
                              (-some-->
                                  data
-                               (json-parse-string it :object-type 'alist)
                                (list (alist-get 'response it))))))
                     (starhugger--log-after-request
                      (list
@@ -474,12 +491,10 @@ See https://platform.openai.com/docs/api-reference/chat/create."
     (starhugger--log-before-request url sending-data)
     (-let* ((request-obj
              (starhugger--request-el-request url
-               :type "POST"
                :header
                `(("Authorization" .
                   ,(format "Bearer %s" starhugger-openai-compat-api-key)))
                :data sending-data
-               :error #'ignore
                :complete
                (cl-function
                 (lambda (&rest
@@ -494,7 +509,6 @@ See https://platform.openai.com/docs/api-reference/chat/create."
                                '()
                              (-some-->
                                  data
-                               (json-parse-string it :object-type 'alist)
                                (alist-get 'choices it)
                                (seq-map
                                 (lambda (choice)
@@ -552,12 +566,10 @@ See https://platform.openai.com/docs/api-reference/chat/create."
     (starhugger--log-before-request url sending-data)
     (-let* ((request-obj
              (starhugger--request-el-request url
-               :type "POST"
                :header
                `(("Authorization" .
                   ,(format "Bearer %s" starhugger-openai-compat-api-key)))
                :data sending-data
-               :error #'ignore
                :complete
                (cl-function
                 (lambda (&rest
@@ -572,7 +584,6 @@ See https://platform.openai.com/docs/api-reference/chat/create."
                                '()
                              (-some-->
                                  data
-                               (json-parse-string it :object-type 'alist)
                                (alist-get 'choices it)
                                (seq-map
                                 (lambda (choice)
@@ -637,13 +648,6 @@ prioritized over stopping `:process')."
        ((functionp op)
         (recur (funcall op retval) (cdr chain)))))))
 
-(defun starhugger--post-process-make-closure-prefer-local ()
-  (cond
-   ((local-variable-p 'starhugger-post-process-chain) 
-    (-let* ((chain starhugger-post-process-chain))
-      (lambda (str) (starhugger--post-process-do str chain))))
-   (:else #'starhugger--post-process-do)))
-
 (cl-defun starhugger--query-internal (prompt callback &rest args &key display spin backend caller &allow-other-keys)
   "CALLBACK is called with the generated text list and a plist.
 PROMPT is the prompt to use. DISPLAY is whether to display the
@@ -655,7 +659,6 @@ ARGS are the arguments to pass to the BACKEND (or
           (spin-obj
            (and spin starhugger-enable-spinner (starhugger--spinner-start)))
           (backend (or backend starhugger-completion-backend-function))
-          (post-proc-fn (starhugger--post-process-make-closure-prefer-local))
           (request-record nil))
     (letrec ((returned
               (apply backend
@@ -663,25 +666,31 @@ ARGS are the arguments to pass to the BACKEND (or
                      (cl-function
                       (lambda (content-choices
                                &rest cb-args &key error &allow-other-keys)
-                        (cl-callf
-                            (lambda (lst) (delete request-record lst))
-                            (gethash orig-buf (starhugger--running-request-table)
-                                     '()))
-                        (when spin-obj
-                          (funcall spin-obj))
-                        (-let* ((err-str (format "%S" error))
-                                (processed-content-choices
-                                 (-map post-proc-fn content-choices)))
-                          (starhugger--record-generated
-                           prompt
-                           content-choices
-                           :parameters args
-                           :other-info cb-args
-                           :backend backend
-                           :display display)
-                          (when (and error starhugger-notify-request-error)
-                            (message "`starhugger' response error: %s" err-str))
-                          (apply callback processed-content-choices cb-args))))
+                        (my-with-live-buffer-or-current orig-buf
+                          (cl-callf
+                              (lambda (lst) (delete request-record lst))
+                              (gethash orig-buf (starhugger--running-request-table)
+                                       '()))
+                          (when spin-obj
+                            (funcall spin-obj))
+                          (-let* ((err-str (format "%S" error))
+                                  (processed-content-choices
+                                   (-map
+                                    #'starhugger--post-process-do
+                                    content-choices)))
+                            (starhugger--record-generated
+                             prompt
+                             content-choices
+                             :parameters args
+                             :other-info cb-args
+                             :backend backend
+                             :display display)
+                            (when (and error starhugger-notify-request-error)
+                              (message "`starhugger' response error: %s"
+                                       err-str))
+                            (apply callback
+                                   processed-content-choices
+                                   cb-args)))))
                      args)))
       (setq request-record (append returned `(:caller ,caller)))
       (push
@@ -971,12 +980,24 @@ prompt."
      (:else
       placeholder))))
 
-(cl-defun starhugger-instruct-build-messages-default (prefix suffix &optional other-context &key language &allow-other-keys)
-  "Return an OpenAI-compatible /chat/completions \"messages\" parameter.
+(defvar starhugger--instruct-system-prompt-default
+  "You are a code/text completion expert. Your task is to fill in missing code or text.
+The input format uses <FILL> to mark where content should be inserted.
+
+- Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
+- Do NOT include markdown formatting, code blocks, or any other wrapper; the provided markdown markers are just for clarify, don't include them in your answer
+- Do NOT repeat any surrounding text
+- Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
+- Ensure proper indentation and formatting that matches the surrounding code
+- The fill may fit in just a part of a line, or composed of a single or multiple lines
+- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it")
+
+(cl-defun starhugger-instruct-make-messages-prompt-default (prefix suffix &optional other-context &key language &allow-other-keys)
+  "Return an OpenAI-compatible /chat/completions \"messages\" parameter in lisp.
 User prompt is constructed from PREFIX, SUFFIX and OTHER-CONTEXT.
-LANGUAGE: a short string is used to annotate the task, it defaults to the current mode's .  For
-compatibility, the function accepts any keyword arguments that future
-versions may use."
+LANGUAGE: a short string is used to annotate the task, for this
+implementation it defaults to `mode-name'.  For compatibility, the
+function accepts any keyword arguments that future versions may use."
   (-let*
       ((fill-placeholder
         (starhugger--instruct-unique-fill-placeholder
@@ -992,16 +1013,7 @@ versions may use."
        (language (or language (starhugger--guess-language-id)))
        (system-prompt
         (-->
-         "You are a code/text completion expert. Your task is to fill in missing code or text.
-The input format uses <FILL> to mark where content should be inserted.
-
-- Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
-- Do NOT include markdown formatting, code blocks, or any other wrapper; the markdown code block markers are just for clarify, don't answer with them
-- Do NOT repeat any surrounding text
-- Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
-- Ensure proper indentation and formatting that matches the surrounding code
-- The fill may fit in just a part of a line, or composed of a single or multiple lines
-- If the fill is part of an uncompleted function, just try to fill within that function without writing another function outside of it"
+         starhugger--instruct-system-prompt-default
          (if (equal "<FILL>" fill-placeholder)
              it
            (string-replace "<FILL>" fill-placeholder it))))
@@ -1024,14 +1036,14 @@ The replacement for <FILL> is:"
     `[((role . "system") (content . ,system-prompt))
       ((role . "user") (content . ,user-prompt))]))
 
-(defcustom starhugger-instruct-build-messages-function
-  #'starhugger-instruct-build-messages-default
+(defcustom starhugger-instruct-make-messages-prompt-function
+  #'starhugger-instruct-make-messages-prompt-default
   "Function to construct \"messages\" when using an instruction-tuned model.
-See `starhugger-instruct-build-messages-default' for compatible
+See `starhugger-instruct-make-messages-prompt-default' for compatible
 arguments and return value."
   :type 'function)
 
-(defun starhugger--prompt-build-components ()
+(defun starhugger--prompt-make-components ()
   (if (and starhugger-fill-in-the-middle
            ;; don't use fill mode when at trailing newlines
            (not (looking-at-p "\n*\\'")))
@@ -1075,11 +1087,11 @@ arguments and return value."
 
 (defun starhugger--async-prompt (callback)
   "CALLBACK is called with the constructed prompt."
-  (-let* (([pre-code suf-code] (starhugger--prompt-build-components)))
+  (-let* (([pre-code suf-code] (starhugger--prompt-make-components)))
     (cond
      ((member starhugger-fill-in-the-middle '(instruct))
       (-let* ((messages
-               (funcall starhugger-instruct-build-messages-function
+               (funcall starhugger-instruct-make-messages-prompt-function
                         pre-code
                         suf-code)))
         (funcall callback
