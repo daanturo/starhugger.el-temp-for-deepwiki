@@ -1,7 +1,14 @@
 * Version 0.7.0
 
 - Add OpenAI-compatible API support make it the default, the default base URL is still Ollama's.
-- Remove Hugging Face's old text inference backend (https://github.com/daanturo/starhugger.el/issues/3).
+  
+- Removals:
+  - Hugging Face's old text inference backend (https://github.com/daanturo/starhugger.el/issues/3).
+  - Manual FIM prompt construction, just use the "suffix" parameter of APIs.
+  - The unusable "grep-context".
+  - Commands out the package's scope: ~starhugger-send~, ~starhugger-suggest-git-commit-message~.
+
+- Add chat models support.
 
 * Version 0.6.0
 

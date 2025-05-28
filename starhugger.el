@@ -984,12 +984,13 @@ prompt."
   "You are a code/text completion expert. Your task is to fill in missing code or text.
 The input format uses <FILL> to mark where content should be inserted.
 
+Requirements:
 - Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
 - Do NOT include markdown formatting, code blocks, or any other wrapper; the provided markdown markers are just for clarify, don't include them in your answer
 - Do NOT repeat any surrounding text
 - Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
-- Ensure proper indentation and formatting that matches the surrounding code
-- The fill may fit in just a part of a line, or composed of a single or multiple lines
+- Ensure proper indentation and formatting of the surrounding code
+- The fill may not always be composed of multiple lines, it may be just a part of a line
 - If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it")
 
 (cl-defun starhugger-instruct-make-messages-prompt-default (prefix suffix &optional other-context &key language &allow-other-keys)

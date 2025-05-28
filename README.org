@@ -14,9 +14,8 @@ https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a81
 
 * Breaking change!
 
-The old Hugging text inference backend was removed, including manual FIM prompt construction.
-
-Use an OpenAI-compatible API provider (default for now) instead.
+- [[https://gitlab.com/daanturo/starhugger.el/-/tags/v0.6.0][Version 0.7.0]]: The old Hugging text inference backend was removed, including manual FIM prompt construction.
+Use an OpenAI-compatible API provider (the default for now) instead.
 
 * Installation
 
@@ -73,7 +72,7 @@ The "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/cha
 
 *Use instruction-tuned models*
 
-Since FIM-trained models are limited in number, and the majority of released models are instruction-tuned, starhugger also supports chat models via prompting and post-processing.  But this is not perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.
+Since FIM-trained models are limited in number, and the majority of released models are instruction-tuned, starhugger also supports chat models via prompting and post-processing.  
 
 #+begin_src elisp
 (setq starhugger-fill-in-the-middle 'instruct) ; Must be set to prepare a suitable prompt for the chat model
@@ -86,6 +85,9 @@ Since FIM-trained models are limited in number, and the majority of released mod
 (setq starhugger-model-id "gemma3:12b")
 #+end_src
 
+To use different system and/or user prompt, customize ~starhugger-instruct-make-messages-prompt-function~.
+
+This is not perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code, the post-processing steps (~starhugger-post-process-chain~) use some unproven heuristics to extract "just" code from the response.
 
 *Additional settings*
 
@@ -167,3 +169,5 @@ Emacs overlays are used under the hood to display inline suggestion, there are s
 - [ ] Find a way to take other files into account [[https://thakkarparth007.github.io/copilot-explorer/posts/copilot-internals.html][Copilot Internals | thakkarparth007.github.io]], or a RAG system.
 
 - [-] With [[https://github.com/milanglacier/minuet-ai.el][prompt engineering]], allow making use of conversational models, not just limited to FIM-supported coding ones.
+
+- [ ] Use different backends and/or presets for different commands, for example: auto mode uses a lighter model than the explicit ~starhugger-trigger-suggestion~.
