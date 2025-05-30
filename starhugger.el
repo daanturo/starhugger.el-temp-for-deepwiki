@@ -120,9 +120,13 @@ Return nil if not found."
 
 (cl-defun starhugger--insert-log* (objs &key (end "\n") (sep " ") (fmt "%s") buffer)
   (-let* ((buf (or buffer starhugger-generated-buffer)))
-    (get-buffer-create buf)
+    (when (not (get-buffer buf))
+      (get-buffer-create buf)
+      (with-current-buffer buf
+        (setq-local outline-regexp "#+")
+        (setq-local buffer-read-only t)))
     (starhugger--with-buffer-scrolling
-      buf (setq buffer-read-only t)
+      buf
       (dlet ((inhibit-read-only t))
         (goto-char (point-max))
         (while (not (seq-empty-p objs))
@@ -294,13 +298,12 @@ set temperature at all."
           (heading
            (-->
             (if time-end
-                (format "# [%s] request, [%s] response:"
+                (format "\n# [%s] request, [%s] response:"
                         time-beg-str
                         time-end-str)
-              (format "# [%s] request:" time-beg-str))
+              (format "\n# [%s] request:" time-beg-str))
             (propertize it 'face '(:foreground "yellow" :weight bold)))))
-    (starhugger--insert-log
-     "\n" heading "\n" data-json "\n")))
+    (starhugger--insert-log heading "\n" data-json "\n")))
 
 (cl-defun starhugger--request-el-request (url &rest settings &key type data error complete parser &allow-other-keys)
   "Wrapper around (`request' URL @SETTINGS) that silences errors when aborting.
@@ -425,7 +428,8 @@ https://platform.openai.com/docs/api-reference/completions/create."
 (defvar starhugger-openai-compat-chat-completions-endpoint "/chat/completions"
   "Chat models's completions endpoint of `starhugger-openai-compat-url'.")
 
-(defcustom starhugger-openai-compat-chat-completions-parameter-alist '((stream . :false))
+(defcustom starhugger-openai-compat-chat-completions-parameter-alist
+  '((stream . :false) (reasoning_effort . "low"))
   "Parameters for the /chat/completions endpoint.
 See https://platform.openai.com/docs/api-reference/chat/create."
   :type 'alist)
@@ -714,7 +718,7 @@ When this minor mode is off, the overlay must not be shown."
     (unless starhugger-inlining-mode
       (starhugger-inlining-mode))))
 
-(defcustom starhugger-numbers-of-suggestions-to-fetch '(2 3)
+(defcustom starhugger-numbers-of-suggestions-to-fetch '(1 3)
   "List of (natural) numbers of suggestions to fetch.
 
 The first number is the number of suggestions to fetch when
@@ -1360,7 +1364,7 @@ Note that the number of suggestions are limited by
 
 ;;;; Auto-mode
 
-(defcustom starhugger-auto-idle-time 0.5
+(defcustom starhugger-auto-idle-time 1.0
   "Seconds to wait after typing, before fetching.
 Note that the time taken to fetch isn' instantaneous, so we have
 to wait more after this unless the suggestion(s) is already
