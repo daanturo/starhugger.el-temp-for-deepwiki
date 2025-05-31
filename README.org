@@ -1,7 +1,7 @@
 [[https://melpa.org/#/starhugger][file:https://melpa.org/packages/starhugger-badge.svg]] [[https://stable.melpa.org/#/starhugger][file:https://stable.melpa.org/packages/starhugger-badge.svg]]
 
 
-- LLM/AI-powered text & code completion client.
+- LLM/AI-powered text & code completion client for Emacs.
 
 Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]], [[https://github.com/ollama/ollama][Ollama]].
 
@@ -14,12 +14,12 @@ https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a81
 
 * Breaking change!
 
-- [[https://gitlab.com/daanturo/starhugger.el/-/tags/v0.6.0][Version 0.7.0]]: The old Hugging text inference backend was removed, including manual FIM prompt construction.
+- [[https://gitlab.com/daanturo/starhugger.el/-/tags/v0.7.0][Version 0.7.0]]: The old Hugging text inference backend was removed, including manual FIM prompt construction.
 Use an OpenAI-compatible API provider (the default for now) instead.
 
 * Installation
 
-Starhugger can be installed from [[https://melpa.org/#/starhugger][MELPA - Starhugger]], using the command ~package-install~.
+Starhugger can be installed from [[https://melpa.org/#/starhugger][MELPA]], using the command ~M-x package-install~.
 
 Of if you want to install from source, add one of the following to your configuration:
 
@@ -42,54 +42,72 @@ Or any package manager of your choice.
 
 * Usage
 
-** Example configuration
+** Basic setup
 
 By default, starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the base URL and the corresponding endpoint.
 
 The "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/chat/completions~ doesn't.
 
 #+begin_src elisp
-;; Example: a Hugging Face Inference provider
-(setq starhugger-openai-compat-url "https://router.huggingface.co/nebius/v1")
+;; Example: a Hugging Face Inference provider, note the "/completions" endpoint
+(setq starhugger-openai-compat-base-completions-url "https://router.huggingface.co/nebius/v1/completions")
 
-(setq starhugger-openai-compat-base-completions-endpoint "/completions") ; The default, if the provider differs set it accordingly
-(setq starhugger-completion-backend-function #'starhugger-openai-compat-api-base-completions) ; The current default, use it for FIM models
+(setq starhugger-openai-compat-api-key "Your API key or access token.")
+
+;; The current default, use it for FIM models
+(setq starhugger-completion-backend-function #'starhugger-openai-compat-api-base-completions)
 
 ;; The language model's unique on the selected provider, remember this should be
-;; a base (not instruction-tuned/chat) model that supports FIM
+;; a base (not chat) model that was trained with FIM
 (setq starhugger-model-id "Qwen/Qwen2.5-Coder-7B-fast")
 
+;;;; Key bindings
+
+;; Fetch and display
 (global-set-key (kbd "M-\\") #'starhugger-trigger-suggestion)
 
 (with-eval-after-load 'starhugger
   ;; `starhugger-inline-menu-item' makes a conditional binding that is only active at the inline suggestion start
   (define-key starhugger-inlining-mode-map (kbd "TAB") (starhugger-inline-menu-item #'starhugger-accept-suggestion))
+  ;; Cycle among fetched suggestions
   (define-key starhugger-inlining-mode-map (kbd "M-[") (starhugger-inline-menu-item #'starhugger-show-prev-suggestion))
   (define-key starhugger-inlining-mode-map (kbd "M-]") (starhugger-inline-menu-item #'starhugger-show-next-suggestion))
+  ;; Partial acceptance
   (define-key starhugger-inlining-mode-map (kbd "M-f") (starhugger-inline-menu-item #'starhugger-accept-suggestion-by-word)))
 #+end_src
+
+Use ~starhugger-dismiss-suggestion~ (bound to =C-g= by default when showing suggestion) to cancel.
+
+There is also a buffer-local minor ~starhugger-auto-mode~, but be careful when using it for non-local providers because of their limit rates and/or charging fees.  Consider raising ~starhugger-auto-idle-time~ up.
 
 
 *Use instruction-tuned models*
 
-Since FIM-trained models are limited in number, and the majority of released models are instruction-tuned, starhugger also supports chat models via prompting and post-processing.  
+There are only so few FIM-trained models, the majority of released LLMs are instruction-tuned, starhugger also tries to support the latter type of models via prompting and post-processing.  
 
 #+begin_src elisp
-(setq starhugger-fill-in-the-middle 'instruct) ; Must be set to prepare a suitable prompt for the chat model
 (setq starhugger-completion-backend-function #'starhugger-openai-compat-api-chat-completions)
 
-(setq starhugger-openai-compat-url "http://localhost:11434/v1") ; The current default: Ollama's OpenAI-Compatible API
-(setq starhugger-openai-compat-chat-completions-endpoint "/chat/completions") ; Set appropriately for the provider
+;; Current default: Ollama's OpenAI-Compatible API, set appropriately for the provider
+(setq starhugger-openai-compat-chat-completions-url "http://localhost:11434/v1/chat/completions")
 
-;; Any chat models
+;; Any instruction-tuned model
 (setq starhugger-model-id "gemma3:12b")
 #+end_src
 
-To use different system and/or user prompt, customize ~starhugger-instruct-make-messages-prompt-function~.
+To use different system and/or user prompts, customize ~starhugger-instruct-make-prompt-messages-function~.
 
-This is not perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code, the post-processing steps (~starhugger-post-process-chain~) use some unproven heuristics to extract "just" code from the response.
+This prompt is not perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.  The post-processing steps (~starhugger-post-process-chain~) use some heuristics to extract "just" code from the response.
 
-*Additional settings*
+Beware that reasoning models produce lots of tokens for thinking and take significantly more inference time, you may want to apply some of those settings, depending on the use case and model:
+
+#+begin_src elisp
+(setq starhugger-openai-compat-chat-completions-parameter-alist '((reasoning_effort . "low")))
+
+(add-to-list 'starhugger-instruct-default-system-prompt-messages "/no_think")
+#+end_src
+
+** Optional settings
 
 #+begin_src elisp
 ;; For evil users, dismiss after pressing ESC twice
@@ -117,9 +135,9 @@ This is not perfect, especially on smaller models who usually fail to follow the
 (defun my-starhugger-inlining-mode-h ()
   (if starhugger-inlining-mode
       (progn
-        (add-hook 'my-evil-force-normal-state-hook
-                  (lambda () (starhugger-dismiss-suggestion t))
-                  nil t)
+        (add-hook
+         'my-evil-force-normal-state-hook #'starhugger-dismiss-suggestion
+         nil t)
         (setq my-starhugger-inlining-mode--blamer-mode-state blamer-mode)
         (when my-starhugger-inlining-mode--blamer-mode-state
           (blamer-mode 0)))
@@ -131,17 +149,6 @@ This is not perfect, especially on smaller models who usually fail to follow the
 (add-hook 'starhugger-inlining-mode-hook #'my-starhugger-inlining-mode-h)
 #+end_src
 
-** Primary commands
-
-- Previewing overlay: ~starhugger-trigger-suggestion~ to display the suggestion.
-
-~M-x~ ~starhugger-show-next-suggestion~ and ~starhugger-show-prev-suggestion~ to cycle suggestions.
-
-~M-x~ ~starhugger-accept-suggestion~ to insert current suggestion.
-
-~starhugger-dismiss-suggestion~ (bound to =C-g= by default when showing) to cancel.
-
-There is also ~starhugger-auto-mode~ (non-global minor mode), but take note of its usage for non-local providers because of their limit rates and/or charging fees.
 
 ** Notes
 

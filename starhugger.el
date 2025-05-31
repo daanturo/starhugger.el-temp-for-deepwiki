@@ -61,32 +61,6 @@ window of BUFFER-OR-NAME when at the buffer end."
        (with-current-buffer ,buffer-or-name
          ,@body)))))
 
-(cl-defun starthugger--join-strings-no-repeat-separator (components &optional (separator "/"))
-  "Join COMPONENTS with SEPARATOR in between, without repeating it.
-Joining [\"a\" \"b\"], [\"a\" \"/b\"], [\"a/\" \"b\"], [\"a/\" \"/b\"]
-all gives \"a/b\"."
-  (named-let
-      recur
-      ((comps (seq-rest components))
-       (retval
-        (ignore-error (args-out-of-range)
-          (seq-first components))))
-    (-let* ((new
-             (ignore-error (args-out-of-range)
-               (seq-first comps)))
-            (suf-old (string-suffix-p separator retval))
-            (pre-new (string-prefix-p separator new)))
-      (cond
-       ((seq-empty-p comps)
-        retval)
-       ((and suf-old pre-new)
-        (recur
-         (seq-rest comps) (concat retval (substring new (length separator)))))
-       ((or suf-old pre-new)
-        (recur (seq-rest comps) (concat retval new)))
-       (:else
-        (recur (seq-rest comps) (concat retval separator new)))))))
-
 (defun starhugger--project-root (&optional dir)
   "Return the root directory of DIR (defaults to current directory)'s project.
 Return nil if not found."
@@ -133,7 +107,7 @@ Return nil if not found."
           (-let* ((obj (seq-first objs)))
             (setq objs (seq-rest objs))
             (insert (format fmt obj))
-            (when (not (seq-empty-p objs))
+            (when (and sep (not (seq-empty-p objs)))
               (insert sep))))
         (insert end)))))
 
@@ -228,8 +202,8 @@ Enable this when the return_full_text parameter isn't honored."
 
 (defcustom starhugger-post-process-chain
   `(
-    ;; Remove reasoning models's thoughts
-    ("\\`[ \t\n\r]*<think>[^z-a]*?</think>[ \t\n\r]*" "")
+    ;; Remove reasoning models's thinking tokens
+    ("\\(\n?\\|^\\)<think>[^z-a]*?</think>[ \t\n\r]*" "")
     starhugger-post-process-instruct-markdown-code-block)
   "List of post-processing steps for model responses.
 Each element can be:
@@ -237,18 +211,6 @@ Each element can be:
   the processed text.
 - A list of 2 strings: `replace-regexp-in-string''s first 2 arguments."
   :type '(repeat (choice function (list regexp string))))
-
-(defcustom starhugger-fill-in-the-middle t
-  "Enable using code from both before and after point as prompt.
-
-If set to the symbol '`instruct' and
-`starhugger-completion-backend-function', is appropriate, `starhugger'
-will try to construct a prompt that tells the instruction-tuned language
-model to fill in the spot, enable making use of chat models that don't
-support FIM.  Note that this prompt may not always success.  See also
-the option `starhugger-instruct-make-messages-prompt-function' to customize
-prompting."
-  :type '(choice boolean (const instruct)))
 
 (defcustom starhugger-prompt-after-point-fraction (/ 1.0 4)
   "The length fraction that code after point (suffix) should take."
@@ -283,7 +245,7 @@ set temperature at all."
    (:else
     (apply fn proc event args))))
 
-(defun starhugger--log-request-data (data time-beg &optional time-end)
+(defun starhugger--log-request-data (url data time-beg &optional time-end)
   (-let* ((time-fmt "%FT%T.%3N")
           (time-beg-str (format-time-string time-fmt time-beg))
           (time-end-str (format-time-string time-fmt time-end))
@@ -303,23 +265,29 @@ set temperature at all."
                         time-end-str)
               (format "\n# [%s] request:" time-beg-str))
             (propertize it 'face '(:foreground "yellow" :weight bold)))))
-    (starhugger--insert-log heading "\n" data-json "\n")))
+    (starhugger--insert-log*
+     (list heading (format "{\"URL\": %S}" url) data-json "\n")
+     :sep "\n")))
 
 (cl-defun starhugger--request-el-request (url &rest settings &key type data error complete parser &allow-other-keys)
-  "Wrapper around (`request' URL @SETTINGS) that silences errors when aborting.
-See https://github.com/tkf/emacs-request/issues/226."
+  "Wrapper around (`request' URL @SETTINGS)."
   (declare (indent defun))
   (-let* ((time-beg (current-time))
           (data-in data)
-          (_ (progn (starhugger--log-request-data data-in time-beg)))
+          (_
+           (progn
+             (starhugger--log-request-data url data-in time-beg)))
           (complete-fn
            (cl-function
             (lambda (&rest returned &key data &allow-other-keys)
               (-let* ((time-end (current-time))
                       (data-out data))
-                (apply complete returned)
-                (starhugger--log-request-data data-out time-beg time-end)))))
-          (req
+                (unwind-protect
+                    (when complete
+                      (apply complete returned))
+                  (starhugger--log-request-data url data-out time-beg
+                                                time-end))))))
+          (req-response
            (apply #'request
                   url
                   :type (or type "POST")
@@ -328,12 +296,17 @@ See https://github.com/tkf/emacs-request/issues/226."
                   :error (or error #'ignore)
                   :complete
                   complete-fn
-                  settings)))
-    (add-function
-     :around
-     (process-sentinel (get-buffer-process (request-response--buffer req)))
-     #'starhugger--request-el--silent-sentinel-a)
-    req))
+                  settings))
+          (req-buf (request-response--buffer req-response)))
+    ;;  Silence errors when aborting, see https://github.com/tkf/emacs-request/issues/226.
+    (add-function :around
+                  (process-sentinel
+                   (get-buffer-process (request-response--buffer req-response)))
+                  #'starhugger--request-el--silent-sentinel-a)
+    (list
+     :request-response req-response
+     :process (get-buffer-process req-buf)
+     :cancel-fn (lambda () (request-abort req-response)))))
 
 ;;;;; Backends
 
@@ -350,13 +323,24 @@ See https://github.com/tkf/emacs-request/issues/226."
 See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
   :type 'alist)
 
-(cl-defun starhugger-ollama-completion-api (prompt callback &rest args &key
-                                                   model force-new max-new-tokens
-                                                   prefix suffix &allow-other-keys)
+(cl-defun starhugger-ollama-completion-api (prompt
+                                            callback
+                                            &rest
+                                            args
+                                            &key
+                                            model
+                                            force-new
+                                            max-new-tokens
+                                            prefix
+                                            suffix
+                                            &allow-other-keys)
   (-let* ((model (or model starhugger-model-id))
           (sending-data
            (starhugger--json-serialize
-            `((prompt . ,(if suffix prefix prompt))
+            `((prompt .
+                      ,(if suffix
+                           prefix
+                         prompt))
               (model . ,model)
               ,@(and suffix `((suffix . ,suffix)))
               (options
@@ -367,47 +351,24 @@ See https://github.com/ollama/ollama/blob/main/docs/api.md#parameters."
                ,@(alist-get 'options starhugger-ollama-additional-parameter-alist))
               (stream . :false)
               ,@starhugger-ollama-additional-parameter-alist))))
-    (-let* ((request-obj
-             (starhugger--request-el-request
-               starhugger-ollama-generate-api-url
-               :data sending-data
-               :complete
-               (cl-function
-                (lambda (&rest
-                         returned
-                         &key
-                         data
-                         error-thrown
-                         response
-                         &allow-other-keys)
-                  (-let* ((generated-lst
-                           (if error-thrown
-                               '()
-                             (-some-->
-                                 data
-                               (list (alist-get 'response it))))))
-                    (funcall callback
-                             generated-lst
-                             :model model
-                             :error
-                             (and error-thrown
-                                  `((error-thrown ,error-thrown)
-                                    (data ,data)))))))))
-            (request-buf (request-response--buffer request-obj))
-            (request-proc (get-buffer-process request-buf))
-            (cancel-fn (lambda () (request-abort request-obj))))
-      (list
-       :cancel-fn cancel-fn
-       :process request-proc
-       :request-response request-obj))))
+    (starhugger--request-el-request
+      starhugger-ollama-generate-api-url
+      :data sending-data
+      :complete
+      (cl-function
+       (lambda (&rest returned &key data error-thrown  &allow-other-keys)
+         (-let* ((generated-lst
+                  (if error-thrown
+                      '()
+                    (-some--> data (list (alist-get 'response it))))))
+           (funcall callback
+                    generated-lst
+                    :model model
+                    :error
+                    (and error-thrown
+                         `((error-thrown ,error-thrown) (data ,data))))))))))
 
 ;;;;;; OpenAI-compatible API
-
-;; Default value: Ollama's local server
-(defcustom starhugger-openai-compat-url "http://localhost:11434/v1"
-  "Base URL for OpenAI-compatible API.
-See also `starhugger-openai-compat-base-completions-endpoint'"
-  :type 'string)
 
 (defcustom starhugger-openai-compat-api-key nil
   "API key for authentication at your provider.
@@ -415,43 +376,53 @@ This string must be unibyte, ensure that before dynamically setting
 with (`encode-coding-string' ... \\='utf-8)."
   :type 'string)
 
-(defvar starhugger-openai-compat-base-completions-endpoint "/completions"
-  "Base models's completions endpoint of `starhugger-openai-compat-url'.")
+(defcustom starhugger-openai-compat-base-completions-url "http://localhost:11434/v1/completions"
+  "OpenAI-compatible API's URL, the \"/completions\"-like endpoint."
+  :type 'string)
 
-(defcustom starhugger-openai-compat-base-completions-parameter-alist '((stream . :false))
-  "Parameters for the /completions endpoint.
+(defcustom starhugger-openai-compat-base-completions-parameter-alist
+  '((stream . :false))
+  "Additional parameters for the /completions endpoint.
 An alist (Info node `(elisp) Association Lists') to be converted to JSON
 with `json-serialize'.  See
 https://platform.openai.com/docs/api-reference/completions/create."
   :type 'alist)
 
-(defvar starhugger-openai-compat-chat-completions-endpoint "/chat/completions"
-  "Chat models's completions endpoint of `starhugger-openai-compat-url'.")
+(defcustom starhugger-openai-compat-chat-completions-url "http://localhost:11434/v1/chat/completions"
+  "OpenAI-compatible API's URL, the \"/chat/completions\"-like endpoint."
+  :type 'string)
 
 (defcustom starhugger-openai-compat-chat-completions-parameter-alist
-  '((stream . :false) (reasoning_effort . "low"))
-  "Parameters for the /chat/completions endpoint.
+  '((stream . :false))
+  "Additional parameters for the /chat/completions endpoint.
 See https://platform.openai.com/docs/api-reference/chat/create."
   :type 'alist)
 
-(cl-defun starhugger-openai-compat-api-base-completions
-    (prompt
-     callback
-     &rest
-     args
-     &key
-     model
-     force-new
-     max-new-tokens
-     prefix
-     suffix
-     &allow-other-keys)
-  (-let* ((model (or model starhugger-model-id))
-          (url
-           (starthugger--join-strings-no-repeat-separator
-            (list
-             starhugger-openai-compat-url
-             starhugger-openai-compat-base-completions-endpoint)))
+(defcustom starhugger-instruct-make-prompt-messages-function
+  #'starhugger-instruct-make-prompt-messages-default
+  "Function to construct \"messages\" when using an instruction-tuned model.
+It's used inside `starhugger-openai-compat-api-chat-completions'.  See
+`starhugger-instruct-make-prompt-messages-default' for compatible
+arguments and return value."
+  :type 'function)
+
+(cl-defun starhugger-openai-compat-api-base-completions (prompt
+                                                         callback
+                                                         &rest
+                                                         args
+                                                         &key
+                                                         model
+                                                         force-new
+                                                         max-new-tokens
+                                                         prefix
+                                                         suffix
+                                                         &allow-other-keys)
+  (-let* ((url starhugger-openai-compat-base-completions-url)
+          (headers
+           `(("Content-Type" . "application/json")
+             ("Authorization" .
+              ,(format "Bearer %s" starhugger-openai-compat-api-key))))
+          (model (or model starhugger-model-id))
           (sending-data
            (starhugger--json-serialize
             `((prompt .
@@ -465,63 +436,49 @@ See https://platform.openai.com/docs/api-reference/chat/create."
               (echo . :false)
               (stream . :false)
               ,@starhugger-openai-compat-base-completions-parameter-alist))))
-    (-let* ((request-obj
-             (starhugger--request-el-request url
-               :header
-               `(("Authorization" .
-                  ,(format "Bearer %s" starhugger-openai-compat-api-key)))
-               :data sending-data
-               :complete
-               (cl-function
-                (lambda (&rest
-                         returned
-                         &key
-                         data
-                         error-thrown
-                         response
-                         &allow-other-keys)
-                  (-let* ((generated-lst
-                           (if error-thrown
-                               '()
-                             (-some-->
-                                 data
-                               (alist-get 'choices it)
-                               (seq-map
-                                (lambda (choice)
-                                  (alist-get 'text choice))
-                                it)))))
-                    (funcall callback
-                             generated-lst
-                             :model model
-                             :error
-                             (and error-thrown
-                                  `((error-thrown ,error-thrown)
-                                    (data ,data)))))))))
-            (request-buf (request-response--buffer request-obj))
-            (request-proc (get-buffer-process request-buf))
-            (cancel-fn (lambda () (request-abort request-obj))))
-      (list
-       :cancel-fn cancel-fn
-       :process request-proc
-       :request-response request-obj))))
+    (starhugger--request-el-request
+      url
+      :headers headers
+      :data sending-data
+      :complete
+      (cl-function
+       (lambda (&rest returned &key data error-thrown &allow-other-keys)
+         (-let* ((generated-lst
+                  (if error-thrown
+                      '()
+                    (-some-->
+                        data (alist-get 'choices it)
+                        (seq-map (lambda (choice) (alist-get 'text choice)) it)))))
+           (funcall callback
+                    generated-lst
+                    :model model
+                    :error
+                    (and error-thrown
+                         `((error-thrown ,error-thrown) (data ,data))))))))))
 
-(cl-defun starhugger-openai-compat-api-chat-completions
-    (_prompt
-     callback
-     &rest
-     args
-     &key
-     messages
-     model
-     force-new
-     max-new-tokens
-     &allow-other-keys)
-  (-let* ((model (or model starhugger-model-id))
-          (url
-           (starthugger--join-strings-no-repeat-separator
-            (list
-             starhugger-openai-compat-url
-             starhugger-openai-compat-chat-completions-endpoint)))
+(cl-defun starhugger-openai-compat-api-chat-completions (_prompt
+                                                         callback
+                                                         &rest
+                                                         args
+                                                         &key
+                                                         model
+                                                         force-new
+                                                         max-new-tokens
+                                                         prefix
+                                                         suffix
+                                                         context
+                                                         &allow-other-keys)
+  (-let* ((url starhugger-openai-compat-chat-completions-url)
+          (headers
+           `(("Content-Type" . "application/json")
+             ("Authorization" .
+              ,(format "Bearer %s" starhugger-openai-compat-api-key))))
+          (model (or model starhugger-model-id))
+          (messages
+           (funcall starhugger-instruct-make-prompt-messages-function
+                    prefix
+                    suffix
+                    context))
           (sending-data
            (starhugger--json-serialize
             `((messages . ,messages)
@@ -532,45 +489,28 @@ See https://platform.openai.com/docs/api-reference/chat/create."
                      `((temperature . ,(starhugger--retry-temperature))))
               (stream . :false)
               ,@starhugger-openai-compat-chat-completions-parameter-alist))))
-    (-let* ((request-obj
-             (starhugger--request-el-request url
-               :header
-               `(("Authorization" .
-                  ,(format "Bearer %s" starhugger-openai-compat-api-key)))
-               :data sending-data
-               :complete
-               (cl-function
-                (lambda (&rest
-                         returned
-                         &key
-                         data
-                         error-thrown
-                         response
-                         &allow-other-keys)
-                  (-let* ((generated-lst
-                           (if error-thrown
-                               '()
-                             (-some-->
-                                 data
-                               (alist-get 'choices it)
-                               (seq-map
-                                (lambda (choice)
-                                  (map-nested-elt choice '(message content)))
-                                it)))))
-                    (funcall callback
-                             generated-lst
-                             :model model
-                             :error
-                             (and error-thrown
-                                  `((error-thrown ,error-thrown)
-                                    (data ,data)))))))))
-            (request-buf (request-response--buffer request-obj))
-            (request-proc (get-buffer-process request-buf))
-            (cancel-fn (lambda () (request-abort request-obj))))
-      (list
-       :cancel-fn cancel-fn
-       :process request-proc
-       :request-response request-obj))))
+    (starhugger--request-el-request
+      url
+      :headers headers
+      :data sending-data
+      :complete
+      (cl-function
+       (lambda (&rest returned &key data error-thrown &allow-other-keys)
+         (-let* ((generated-lst
+                  (if error-thrown
+                      '()
+                    (-some-->
+                        data (alist-get 'choices it)
+                        (seq-map
+                         (lambda (choice)
+                           (map-nested-elt choice '(message content)))
+                         it)))))
+           (funcall callback
+                    generated-lst
+                    :model model
+                    :error
+                    (and error-thrown
+                         `((error-thrown ,error-thrown) (data ,data))))))))))
 
 ;;;;; Completion
 
@@ -609,11 +549,10 @@ prioritized over stopping `:process')."
        ((functionp op)
         (recur (funcall op retval) (cdr chain)))))))
 
-(cl-defun starhugger--query-internal (prompt callback &rest args &key display spin backend caller &allow-other-keys)
+(cl-defun starhugger--query-internal (prompt callback &rest args &key spin backend caller &allow-other-keys)
   "CALLBACK is called with the generated text list and a plist.
-PROMPT is the prompt to use. DISPLAY is whether to display the
-generated text in a buffer. SPIN is whether to show a spinner.
-ARGS are the arguments to pass to the BACKEND (or
+PROMPT is the prompt to use.  SPIN is whether to show a spinner.  ARGS
+are the arguments to pass to the BACKEND (or
 `starhugger-completion-backend-function')"
   (run-hooks 'starhugger-before-request-hook)
   (-let* ((orig-buf (current-buffer))
@@ -692,7 +631,7 @@ all of them are relevant all the time."
   (when (and this-command
              (not starhugger--inline-inhibit-changing-overlay)
              starhugger-dismiss-suggestion-after-change)
-    (starhugger-dismiss-suggestion)))
+    (starhugger-dismiss-suggestion nil)))
 
 (define-minor-mode starhugger-inlining-mode
   "Not meant to be called normally.
@@ -939,8 +878,9 @@ prompt."
      (:else
       placeholder))))
 
-(defvar starhugger--instruct-system-prompt-default
-  "You are a code/text completion expert. Your task is to fill in missing code or text.
+(defvar starhugger-instruct-default-system-prompt-messages
+  '(
+    "You are a code/text completion expert. Your task is to fill in missing code or text.
 The input format uses <FILL> to mark where content should be inserted.
 
 Requirements:
@@ -950,63 +890,55 @@ Requirements:
 - Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
 - Ensure proper indentation and formatting of the surrounding code
 - The fill may not always be composed of multiple lines, it may be just a part of a line
-- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it")
+- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it"))
 
-(cl-defun starhugger-instruct-make-messages-prompt-default (prefix suffix &optional other-context &key language &allow-other-keys)
-  "Return an OpenAI-compatible /chat/completions \"messages\" parameter in lisp.
+(cl-defun starhugger-instruct-make-prompt-messages-default (prefix suffix &optional other-context &key language &allow-other-keys)
+  "Return an OpenAI-compatible /chat/completions \"messages\" parameter in Lisp.
 User prompt is constructed from PREFIX, SUFFIX and OTHER-CONTEXT.
 LANGUAGE: a short string is used to annotate the task, for this
 implementation it defaults to `mode-name'.  For compatibility, the
 function accepts any keyword arguments that future versions may use."
-  (-let*
-      ((fill-placeholder
-        (starhugger--instruct-unique-fill-placeholder
-         (concat other-context prefix suffix)))
-       (prj-root (starhugger--project-root))
-       (curr-filename
-        (cond
-         ((and buffer-file-name prj-root)
-          (file-relative-name (file-truename buffer-file-name)
-                              (file-truename prj-root)))
-         (buffer-file-name
-          (file-name-nondirectory buffer-file-name))))
-       (language (or language (starhugger--guess-language-id)))
-       (system-prompt
-        (-->
-         starhugger--instruct-system-prompt-default
-         (if (equal "<FILL>" fill-placeholder)
-             it
-           (string-replace "<FILL>" fill-placeholder it))))
-       (user-prompt
-        (-->
-         "%s\n%s
+  (-let* ((fill-placeholder
+           (starhugger--instruct-unique-fill-placeholder
+            (concat other-context prefix suffix)))
+          (uniquify-fill-placeholder-fn
+           (if (equal "<FILL>" fill-placeholder)
+               #'identity
+             (lambda (str) (string-replace "<FILL>" fill-placeholder str))))
+          (prj-root (starhugger--project-root))
+          (curr-filename
+           (cond
+            ((and buffer-file-name prj-root)
+             (file-relative-name (file-truename buffer-file-name)
+                                 (file-truename prj-root)))
+            (buffer-file-name
+             (file-name-nondirectory buffer-file-name))))
+          (language (or language (starhugger--guess-language-id)))
+          (system-prompts
+           (-map
+            uniquify-fill-placeholder-fn
+            starhugger-instruct-default-system-prompt-messages))
+          (user-prompt
+           (-->
+            "%s\n%s
 ```%s
 %s
 ```\n
 The replacement for <FILL> is:"
-         (if (equal "<FILL>" fill-placeholder)
-             it
-           (string-replace "<FILL>" fill-placeholder it))
-         (format it
-                 (or other-context "")
-                 (or curr-filename "")
-                 (or language "")
-                 (concat prefix fill-placeholder suffix))
-         (string-trim it))))
-    `[((role . "system") (content . ,system-prompt))
+            (funcall uniquify-fill-placeholder-fn it)
+            (format it
+                    (or other-context "")
+                    (or curr-filename "")
+                    (or language "")
+                    (concat prefix fill-placeholder suffix))
+            (string-trim it))))
+    `[,@(--map `((role . "system") (content . ,it)) system-prompts)
       ((role . "user") (content . ,user-prompt))]))
 
-(defcustom starhugger-instruct-make-messages-prompt-function
-  #'starhugger-instruct-make-messages-prompt-default
-  "Function to construct \"messages\" when using an instruction-tuned model.
-See `starhugger-instruct-make-messages-prompt-default' for compatible
-arguments and return value."
-  :type 'function)
-
 (defun starhugger--prompt-make-components ()
-  (if (and starhugger-fill-in-the-middle
-           ;; don't use fill mode when at trailing newlines
-           (not (looking-at-p "\n*\\'")))
+  (if (and
+       ;; don't use fill mode when at trailing newlines
+       (not (looking-at-p "\n*\\'")))
       (-let* ((intend-suf-len
                (floor
                 (* starhugger-max-prompt-length
@@ -1048,19 +980,7 @@ arguments and return value."
 (defun starhugger--async-prompt (callback)
   "CALLBACK is called with the constructed prompt."
   (-let* (([pre-code suf-code] (starhugger--prompt-make-components)))
-    (cond
-     ((member starhugger-fill-in-the-middle '(instruct))
-      (-let* ((messages
-               (funcall starhugger-instruct-make-messages-prompt-function
-                        pre-code
-                        suf-code)))
-        (funcall callback
-                 nil
-                 :messages messages
-                 :prefix pre-code
-                 :suffix suf-code)))
-     (:else
-      (funcall callback pre-code :prefix pre-code :suffix suf-code)))))
+    (funcall callback pre-code :prefix pre-code :suffix suf-code)))
 
 (defun starhugger--get-from-num-or-list (num-or-list &optional idx)
   (cond
@@ -1104,43 +1024,44 @@ and a variadic plist."
             (letrec
                 ((func
                   (lambda (fetch-time)
-                    (apply
-                     #'starhugger--query-internal
-                     prompt
-                     (lambda (generated-texts &rest returned-args)
-                       (when (and (buffer-live-p orig-buf)
-                                  (not (plist-get returned-args :error)))
-                         (with-current-buffer orig-buf
-                           (-let* ((suggt-1st
-                                    (-first-item generated-texts)))
-                             (starhugger--add-to-suggestion-list
-                              generated-texts state)
-                             ;; only display when didn't move or interactive (in that
-                             ;; case we are explicitly waiting)
-                             (when (or interact (= pt0 (point)))
-                               (when (= 1 fetch-time)
-                                 (starhugger--ensure-inlininng-mode)
-                                 (starhugger--init-overlay suggt-1st pt0))
-                               (cond
-                                ((and (< fetch-time num)
-                                      (< (length generated-texts) num))
-                                 (funcall func (+ fetch-time 1)))
-                                ((not (starhugger--active-overlay-p))
-                                 (starhugger--ensure-inlininng-mode 0)))))))
-                       (when callback
-                         (apply callback generated-texts returned-args)))
-                     :max-new-tokens
-                     (or max-new-tokens
-                         (starhugger--get-from-num-or-list
-                          starhugger-max-new-tokens
-                          interact))
-                     :num-return-sequences num
-                     :force-new (or force-new (< 1 fetch-time))
-                     :spin (or starhugger-debug interact)
-                     :caller #'starhugger-trigger-suggestion
-                     :backend
-                     backend
-                     args))))
+                    (my-with-live-buffer-or-current orig-buf
+                      (apply
+                       #'starhugger--query-internal
+                       prompt
+                       (lambda (generated-texts &rest returned-args)
+                         (when (not
+                                (plist-get returned-args :error))
+                           (my-with-live-buffer-or-current orig-buf
+                             (-let* ((suggt-1st
+                                      (-first-item generated-texts)))
+                               (starhugger--add-to-suggestion-list
+                                generated-texts state)
+                               ;; only display when didn't move or interactive (in that
+                               ;; case we are explicitly waiting)
+                               (when (or interact (= pt0 (point)))
+                                 (when (= 1 fetch-time)
+                                   (starhugger--ensure-inlininng-mode)
+                                   (starhugger--init-overlay suggt-1st pt0))
+                                 (cond
+                                  ((and (< fetch-time num)
+                                        (< (length generated-texts) num))
+                                   (funcall func (+ fetch-time 1)))
+                                  ((not (starhugger--active-overlay-p))
+                                   (starhugger--ensure-inlininng-mode 0)))))))
+                         (when callback
+                           (apply callback generated-texts returned-args)))
+                       :max-new-tokens
+                       (or max-new-tokens
+                           (starhugger--get-from-num-or-list
+                            starhugger-max-new-tokens
+                            interact))
+                       :num-return-sequences num
+                       :force-new (or force-new (< 1 fetch-time))
+                       :spin (or starhugger-debug interact)
+                       :caller #'starhugger-trigger-suggestion
+                       :backend
+                       backend
+                       args)))))
               (funcall func 1))))))
     (funcall prompt-fn prompt-callback)))
 
@@ -1217,10 +1138,10 @@ and a variadic plist."
      (starhugger--cancel-requests-in-buffer buf plist-lst))
    (starhugger--running-request-table)))
 
-(defun starhugger-dismiss-suggestion (&optional stop-fetching)
+(cl-defun starhugger-dismiss-suggestion (&optional (stop-fetching t))
   "Clear current suggestion.
-Non-nil STOP-FETCHING (interactively, true by default): also
-cancel unfinished fetches."
+Non-nil STOP-FETCHING (true by default): also cancel unfinished
+requests."
   (interactive (list (not current-prefix-arg)))
   (when stop-fetching
     (starhugger--cancel-requests-in-buffer (current-buffer)))
@@ -1247,22 +1168,24 @@ executed in a temporary buffer)."
   (-when-let* ((pos (overlay-start starhugger--overlay)))
     (dlet ((starhugger--inline-inhibit-changing-overlay t))
       (goto-char pos)
-      (-let* ((suggt (starhugger--current-overlay-suggestion))
+      (-let* ((suggestion (starhugger--current-overlay-suggestion))
               (text-to-insert
                (with-temp-buffer
-                 (insert suggt)
+                 (insert suggestion)
                  (goto-char (point-min))
                  (apply by args)
                  (buffer-substring (point-min) (point)))))
         (insert text-to-insert)
-        (if (equal suggt text-to-insert)
+        ;; If the whole suggestion is consumed, clear the overlay, else remove
+        ;; the accepted part from the overlay's current start
+        (if (equal suggestion text-to-insert)
             (progn
-              (starhugger-dismiss-suggestion)
-              (and starhugger-trigger-suggestion-after-accepting
-                   (starhugger-trigger-suggestion :interact t)))
+              (starhugger-dismiss-suggestion nil)
+              (when starhugger-trigger-suggestion-after-accepting
+                (starhugger-trigger-suggestion :interact t)))
           (progn
             (starhugger--update-overlay
-             (string-remove-prefix text-to-insert suggt))))
+             (string-remove-prefix text-to-insert suggestion))))
         ;; maybe put parentheses balancer here?
         (run-hooks 'starhugger-post-insert-hook)
         text-to-insert))))
@@ -1417,8 +1340,9 @@ cached, for the suggestion to appear."
              (overlay-get
               starhugger--overlay 'starhugger-ovlp-original-position))
             (end (overlay-end starhugger--overlay)))
-      (unless (and (numberp beg) (numberp end) (<= beg (point) end))
-        (starhugger-dismiss-suggestion)))))
+      ;; Point isn't in the overlay range anymore: clear it
+      (when (not (and (numberp beg) (numberp end) (<= beg (point) end)))
+        (starhugger-dismiss-suggestion nil)))))
 
 ;;;###autoload
 (define-minor-mode starhugger-auto-mode

@@ -1,16 +1,19 @@
 * Version 0.7.0
 
-- Add OpenAI-compatible API support make it the default, the default base URL is still Ollama's.
+- Add OpenAI-compatible API support and make it the default, the default URL is still Ollama's local server.
   
 - Removals:
-  - Hugging Face's old text inference backend (https://github.com/daanturo/starhugger.el/issues/3).
+  - Hugging Face's old text inference backend and its accompanying options (https://github.com/daanturo/starhugger.el/issues/3).
   - Manual FIM prompt construction, just use the "suffix" parameter of APIs.
   - The unusable "grep-context".
   - Commands out the package's scope: ~starhugger-send~, ~starhugger-suggest-git-commit-message~.
-
-- Add chat models support.
+  - Option ~starhugger-fill-in-the-middle~, it's now always applied.
+    
+- Add *instruction-tuned models* support.
 
 - Change ~starhugger-trigger-suggestion-after-accepting~'s default value to false (nil).
+
+- More conservative defaults for ~starhugger-auto-idle-time~, ~starhugger-numbers-of-suggestions-to-fetch~.
 
 * Version 0.6.0
 
