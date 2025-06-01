@@ -311,6 +311,14 @@ will (re-)apply for all."
       (starhugger--init-overlay recent-suggt pt))
     recent-suggt))
 
+(defvar starhugger--running-request-table--table nil
+  "Keys are buffers.")
+(defun starhugger--running-request-table ()
+  (unless starhugger--running-request-table--table
+    (setq starhugger--running-request-table--table
+          (make-hash-table :test #'equal)))
+  starhugger--running-request-table--table)
+
 (defvar starhugger-interactive-config-instance
   (starhugger-config-openai-compat-base-completions
    :model
@@ -343,54 +351,56 @@ to multiple fetches."
                 :config starhugger-interactive-config-instance))
   (-let* ((config (or config starhugger-auto-config-instance))
           (orig-buf (current-buffer))
-          (pt0 (point))
+          (orig-pt (point))
           (state (starhugger--suggestion-positional-state))
           (target-num (slot-value config 'num))
-          (fetched-num 0)
-          (spin-stop-fn
-           (and interact starhugger-enable-spinner (starhugger--spinner-start))))
-    (letrec
-        ((fetching-loop
-          (lambda (this-time-num)
-            (-let*
-                ((query-internal-callback
-                  (starhugger--lambda (content-choices
-                                       &rest query-internal-result &key error &allow-other-keys)
-                    (when callback
-                      (apply callback content-choices query-internal-result))
-                    (cond
-                     ((not (buffer-live-p orig-buf)))
-                     (:else
-                      (with-current-buffer orig-buf
-                        (when (< 0 (length content-choices))
-                          (starhugger--ensure-inlininng-mode))
-                        (-let* ((suggt-1st (-first-item content-choices)))
-                          (starhugger--add-to-suggestion-list
-                           content-choices state)
-                          ;; Only display and continue when didn't move or
-                          ;; interactive, in that case we are explicitly waiting
-                          (when (or interact (= pt0 (point)))
-                            ;; Initial fetched suggestion
-                            (when (= 0 fetched-num)
-                              (starhugger--ensure-inlininng-mode)
-                              (starhugger--init-overlay suggt-1st pt0))
-                            (cl-incf fetched-num (length content-choices))
-                            (when (and spin-stop-fn
-                                       (or error (>= fetched-num target-num)))
-                              (funcall spin-stop-fn))
-                            ;; Continue fetching until there are enough targeted
-                            ;; number of suggestions
-                            (cond
-                             ((and (< fetched-num target-num))
-                              (funcall fetching-loop (- target-num fetched-num)))
-                             ((not (starhugger--active-overlay-p))
-                              (starhugger--ensure-inlininng-mode 0)))))))))))
-              (starhugger--query-internal
-               config
-               query-internal-callback
-               :caller #'starhugger-trigger-suggestion
-               :num this-time-num)))))
-      (funcall fetching-loop target-num))))
+          (spin-stop-maybe
+           (or (and interact
+                    starhugger-enable-spinner
+                    (starhugger--spinner-start))
+               #'ignore))
+          (request-record nil))
+    (starhugger--query-until-number
+     config target-num
+     (starhugger--lambda (content-choices
+                          accumulated-num
+                          &rest
+                          query-until-number-result
+                          &key
+                          error
+                          &allow-other-keys)
+       (when callback
+         (apply callback content-choices query-until-number-result))
+       (cond
+        ((not (buffer-live-p orig-buf)))
+        (:else
+         (with-current-buffer orig-buf
+           (-when-let* ((_ (< 0 (length content-choices)))
+                        (1st-choice (seq-first content-choices))
+                        ;; Only display and continue when didn't move or
+                        ;; interactive, in that case we are explicitly waiting
+                        (_ (or interact (= orig-pt (point)))))
+             (starhugger--ensure-inlininng-mode)
+             (starhugger--add-to-suggestion-list content-choices state)
+             ;; Initial request
+             (when (= accumulated-num (length content-choices))
+               (starhugger--init-overlay 1st-choice orig-pt)))
+           (when (or error (<= target-num accumulated-num))
+             (cl-callf
+                 (lambda (lst) (delete request-record lst))
+                 (gethash orig-buf (starhugger--running-request-table) '()))
+             (funcall spin-stop-maybe))
+           (when (not (starhugger--active-overlay-p))
+             (starhugger--ensure-inlininng-mode 0))))))
+     :caller #'starhugger-trigger-suggestion)))
+
+;; NOTE TODO PROBLEM: Trying record the request, to cancel them when needed.
+;; But the chain looks like this:
+
+;; Trigger -> Async context prompt starts -> Async context prompt ends -> Async
+;; LM request starts (*) -> Async LM request ends, content choices
+
+;; It's impossible(?) to get the LM request object when it starts.
 
 (defun starhugger--triggger-suggestion-prefer-cache
     (in-buffer position &optional cache-only callback)
