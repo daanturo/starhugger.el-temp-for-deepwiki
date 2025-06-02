@@ -230,6 +230,7 @@ the corresponding buffer key so that starhugger can terminate them."
   "Wrapper around (`request' URL @SETTINGS).
 ERROR are passed to `request'."
   (declare (indent defun))
+  (run-hooks 'starhugger-before-request-hook)
   (-let*
       ((req-response
         (apply #'request url :error (or error #'ignore) settings))
@@ -325,7 +326,6 @@ with the context string), the rest are ignored at the moment.")
     :initarg :system-prompts
     :initform []
     :type sequence
-    :reader starhugger-config.system-prompts
     :documentation "Sequence of system prompts.")
    (join-prompts
     :initarg :join-prompts
@@ -345,7 +345,6 @@ will the substituted by `starhugger-instruct-default-system-prompts'.")
    (post-process
     :initarg :post-process
     :initform []
-    :reader starhugger-config.post-process
     :documentation
     "List of post-processing steps for model responses.
 Each element can be:
@@ -404,18 +403,26 @@ Each element can be:
   (when (equal [] (slot-value instance 'post-process))
     (setf (slot-value instance 'post-process) [t])))
 
-(cl-defmethod starhugger-config.system-prompts ((config starhugger-config))
+(defclass starhugger-config-json-type-request (starhugger-config) () :abstract t)
+
+(cl-defgeneric starhugger-get (obj slot &rest _args)
+  (:documentation "Getter to get SLOT from OBJ.
+Compared to an accessor/reader, this doesn't pollute the symbol list
+with many more functions.")
+  (slot-value obj slot))
+
+(cl-defmethod starhugger-get ((obj starhugger-config) (_slot (eql 'system-prompts)))
   (-splice-list
    (lambda (it) (equal t it))
    starhugger-instruct-default-system-prompts
-   (seq-into (slot-value config 'system-prompts) 'list)))
-(cl-defmethod starhugger-config.post-process ((config starhugger-config))
+   (seq-into (slot-value obj 'system-prompts) 'list)))
+(cl-defmethod starhugger-get ((obj starhugger-config) (_slot (eql 'post-process)))
   (-splice-list
    (lambda (it) (equal t it))
    starhugger-post-process-default-chain
-   (seq-into (slot-value config 'post-process) 'list)))
+   (seq-into (slot-value obj 'post-process) 'list)))
 
-(defclass starhugger-config-json-type-request (starhugger-config) () :abstract t)
+
 
 ;;;;;; Generic methods
 
@@ -435,7 +442,8 @@ PREFIX, SUFFIX, CONTEXT, etc."))
     (config
      callback &rest args &key prefix suffix context num &allow-other-keys))
 
-(cl-defgeneric starhugger--prompt-components-from-buffer (config callback)
+(cl-defgeneric starhugger--prompt-components-from-buffer
+    (config callback &optional context-fn &rest args)
   (:documentation "CALLBACK is called with :context :prefix :suffix."))
 
 (cl-defgeneric starhugger--prompt-prefix-suffix-from-buffer (config))
@@ -529,7 +537,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
    _language
    _filename
    &allow-other-keys)
-  (-let* ((system-prompts (starhugger-config.system-prompts config))
+  (-let* ((system-prompts (starhugger-get config 'system-prompts))
           ((&alist
             'prefix formatted-prefix-with-context 'suffix formatted-suffix)
            (apply
@@ -556,7 +564,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
          '(
            ;; Carriage returns
            ("\r" ""))
-         (starhugger-config.post-process config))))
+         (starhugger-get config 'post-process))))
     (-let* ((op (starhugger--seq-first chain)))
       (cond
        ((seq-empty-p chain)
@@ -678,7 +686,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
                (string-replace "<FILL>" fill-placeholder-unique str))))
           (system-prompts
            (-map
-            uniquify-fill-placeholder-fn (starhugger-config.system-prompts config)))
+            uniquify-fill-placeholder-fn (starhugger-get config 'system-prompts)))
           ((&alist
             'prefix formatted-prefix-with-context 'suffix formatted-suffix)
            (apply
@@ -717,7 +725,7 @@ The replacement for %s is:"
                  (and (proper-list-p prompt) (not (seq-empty-p prompt))))
              `((messages .
                          [,@(--map `((role . "system") (content . ,it))
-                                   (starhugger-config.system-prompts config))
+                                   (starhugger-get config 'system-prompts))
                           ((role . "user") (content . ,prompt))])))
             (:else
              (apply (slot-value config 'prompt-params-fn) config args)))))
@@ -816,13 +824,14 @@ Including :error."))
               (string-trim-right it "[\n\r]+"))))
       (vector prefix-str suffix-str))))
 
+;; TODO: make this more generic
 (cl-defmethod starhugger--prompt-components-from-buffer
-  ((config starhugger-config) callback)
+  ((config starhugger-config) callback &optional context-fn &rest args)
   (-let* ((filename (starhugger--filename-relative-to-project))
           (language (starhugger--guess-prog-language-name))
           ([prefix suffix]
            (starhugger--prompt-prefix-suffix-from-buffer config)))
-    (funcall (slot-value config 'context-fn)
+    (funcall (or context-fn (slot-value config 'context-fn))
              filename prefix suffix
              (lambda (context &rest _)
                (funcall callback
@@ -841,19 +850,11 @@ Including :error."))
    &key
    num
    &allow-other-keys)
-  (run-hooks 'starhugger-before-request-hook)
   (-let* ((orig-buf (current-buffer)))
     ;; Asynchronously construct prompt components
     (starhugger--prompt-components-from-buffer
      config
-     (starhugger--lambda (&rest
-                          async-prompt-result
-                          &key
-                          context
-                          filename
-                          prefix
-                          suffix
-                          &allow-other-keys)
+     (starhugger--lambda (&rest async-prompt-result &key context prefix suffix &allow-other-keys)
        (-let* ((code-len (+ (length prefix) (length suffix)))
                ;; This callback is ran when the request to the language model
                ;; returns
@@ -875,7 +876,6 @@ Including :error."))
                          nil
                          query-callback
                          :context context
-                         :filename filename
                          :prefix prefix
                          :suffix suffix
                          :num
