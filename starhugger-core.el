@@ -24,6 +24,12 @@
   (declare (debug nil) (indent defun))
   `(cl-function (lambda ,@body)))
 
+(defun starhugger--seq-first (seq)
+  "Get first element of SEQ.
+Simple wrapper around `seq-first' that prevents error on empty vectors."
+  (ignore-error (args-out-of-range)
+    (seq-first seq)))
+
 (defun starhugger--json-serialize (object &rest args)
   "Like (`json-serialize' OBJECT @ARGS).
 Additionally prevent errors about multi-byte characters."
@@ -50,13 +56,12 @@ Return STR unchanged if any error(s) happen."
 Return nil if not found."
   (-some--> (project-current nil dir) (project-root it)))
 
-(defvar starhugger--guess-language-id--cache
+(defvar starhugger--guess-prog-language-name--cache
   (make-hash-table :test #'equal))
-(defun starhugger--guess-language-id ()
-  "Guess current buffer's programming language ID."
+(defun starhugger--guess-prog-language-name ()
+  "Guess current buffer's programming language name."
   (with-memoization (gethash
-                     major-mode
-                     starhugger--guess-language-id--cache)
+                     major-mode starhugger--guess-prog-language-name--cache)
     (cond
      ((stringp mode-name)
       (replace-regexp-in-string "[ \t]" "-" (downcase mode-name)))
@@ -126,7 +131,7 @@ BUFFER-OR-NAME when at the buffer end."
       (dlet ((inhibit-read-only t))
         (goto-char (point-max))
         (while (not (seq-empty-p objs))
-          (-let* ((obj (seq-first objs)))
+          (-let* ((obj (starhugger--seq-first objs)))
             (setq objs (seq-rest objs))
             (insert (format fmt obj))
             (when (and sep (not (seq-empty-p objs)))
@@ -250,11 +255,9 @@ Each element can be:
   "Unimplemented reference, just call CALLBACK with nil instead of queried context."
   (apply callback nil '()))
 
-(cl-defgeneric starhugger-make-prompt-array-default
+(cl-defgeneric starhugger-make-prompt-parameters-default
     (_config
-     &rest args &key prefix _suffix _context _filename &allow-other-keys)
-  "Simple ignorance for PREFIX.  ARGS is unused."
-  prefix)
+     &rest args &key prefix _suffix _context _filename &allow-other-keys))
 
 ;;;;;; Generic classes
 
@@ -313,9 +316,9 @@ with the context string), the rest are ignored at the moment.")
 Use when the provider doesn't support the \"prompt\" argument as an
 array.  If this is a non-nil string, join prompts into one using it as
 the separator.")
-   (prompt-array-fn
-    :initarg :prompt-array-fn
-    :initform #'starhugger-make-prompt-array-default
+   (prompt-params-fn
+    :initarg :prompt-params-fn
+    :initform #'starhugger-make-prompt-parameters-default
     :type function
     :documentation
     "Function to construct the system and/or user prompt array.")
@@ -334,7 +337,7 @@ Each element can be:
   ((config starhugger-config) &rest _args &key &allow-other-keys)
   (cl-assert (slot-value config 'model)))
 
-(defclass starhugger-config-model-base (starhugger-config) () :abstract t)
+(defclass starhugger-config-base-type-model (starhugger-config) () :abstract t)
 
 (defvar starhugger-instruct-default-system-prompts
   '(
@@ -350,9 +353,9 @@ Requirements:
 - The fill may not always be composed of multiple lines, it may be just a part of a line
 - If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it"))
 
-(defclass starhugger-config-model-instruct (starhugger-config) () :abstract t)
+(defclass starhugger-config-instruct-type-model (starhugger-config) () :abstract t)
 (cl-defmethod initialize-instance :after
-  ((instance starhugger-config-model-instruct) &rest _args)
+  ((instance starhugger-config-instruct-type-model) &rest _args)
   (when (equal [] (slot-boundp instance 'system-prompts))
     (setf (slot-value instance 'system-prompts)
           starhugger-instruct-default-system-prompts))
@@ -360,21 +363,21 @@ Requirements:
     (setf (slot-value instance 'post-process)
           starhugger-post-process-chain-default)))
 
-(defclass starhugger-config-request-json (starhugger-config) () :abstract t)
+(defclass starhugger-config-json-type-request (starhugger-config) () :abstract t)
 
 ;;;;;; Generic methods
 
-(cl-defgeneric starhugger--choices-from-response-data (_config data)
-  (list data))
+(cl-defgeneric starhugger--choices-from-response-data (_config data))
 
 (cl-defgeneric starhugger--post-process-do (_config str)
   str)
 
 (cl-defgeneric starhugger--request-make-input-data
     (_config &rest _args &key _prompt _prefix _suffix &allow-other-keys)
-  ".
+  (:documentation
+   ".
 If the PROMPT argument is non-nil, prefer it over constructing from
-PREFIX, SUFFIX, CONTEXT, etc.")
+PREFIX, SUFFIX, CONTEXT, etc."))
 
 (cl-defgeneric starhugger--perform-request
     (config
@@ -383,7 +386,7 @@ PREFIX, SUFFIX, CONTEXT, etc.")
 ;;;;;;; Default methods
 
 (cl-defmethod starhugger--perform-request
-  ((config starhugger-config-request-json)
+  ((config starhugger-config-json-type-request)
    callback
    &rest
    args
@@ -423,9 +426,35 @@ PREFIX, SUFFIX, CONTEXT, etc.")
             (starhugger--log-request-data url data-out-lisp time-beg
                                           time-end)))))))
 
+(cl-defun starhugger--format-prefix-suffix-prompts-with-optional-context
+    (&key always-format context prefix suffix language filename &allow-other-keys)
+  (-let* ((format-flag
+           (or always-format
+               (and context (< 0 (length (string-trim context)))))))
+    (cond
+     ((not format-flag)
+      `((prefix . ,prefix) (suffix . ,suffix)))
+     (:else
+      (-let* ((prefix-format
+               "%s\n
+%s
+```%s
+%s")
+              (suffix-format
+               "%s
+```")
+              (new-prefix
+               (format prefix-format
+                       (or context "")
+                       (or filename "")
+                       (or language "")
+                       prefix))
+              (new-suffix (format suffix-format suffix)))
+        `((prefix . ,new-prefix) (suffix . ,new-suffix)))))))
+
 ;; For base models, not sure how to handle repo context, if any
-(cl-defmethod starhugger-make-prompt-array-default
-  ((config starhugger-config-model-base)
+(cl-defmethod starhugger-make-prompt-parameters-default
+  ((config starhugger-config-base-type-model)
    &rest
    args
    &key
@@ -436,22 +465,27 @@ PREFIX, SUFFIX, CONTEXT, etc.")
    _filename
    &allow-other-keys)
   (-let* ((system-prompts (slot-value config 'system-prompts))
-          (len-sys-prompt (length system-prompts))
+          ((&alist
+            'prefix formatted-prefix-with-context 'suffix formatted-suffix)
+           (apply
+            #'starhugger--format-prefix-suffix-prompts-with-optional-context
+            args))
           (join-sep (slot-value config 'join-prompts))
-          (lst `(,@system-prompts ,prefix)))
+          (prefix-lst `(,@system-prompts ,formatted-prefix-with-context)))
     (cond
-     ((and (< 0 len-sys-prompt) (not join-sep))
-      lst)
-     ((and (< 0 len-sys-prompt) join-sep)
-      (string-join lst join-sep))
-     ;; (= 0 len-sys-prompt)
+     ((and (< 1 (length prefix-lst)) (not join-sep))
+      `((prompt . ,prefix-lst) (suffix . ,formatted-suffix)))
+     ((and (< 1 (length prefix-lst)) join-sep)
+      `((prompt . ,(string-join prefix-lst join-sep))
+        (suffix . ,formatted-suffix)))
      (:else
-      prefix))))
+      `((prompt . ,formatted-prefix-with-context)
+        (suffix . ,formatted-suffix))))))
 
 (cl-defmethod starhugger--post-process-do ((config starhugger-config) str)
   (named-let
       recur ((retval str) (chain (slot-value config 'post-process)))
-    (-let* ((op (seq-first chain)))
+    (-let* ((op (starhugger--seq-first chain)))
       (cond
        ((seq-empty-p chain)
         retval)
@@ -465,8 +499,13 @@ PREFIX, SUFFIX, CONTEXT, etc.")
 
 ;;;;;; Ollama
 
-(defclass starhugger-config-ollama-api-generate (starhugger-config-model-base starhugger-config-request-json)
-  ((url :initform "http://localhost:11434/api/generate")))
+(defclass starhugger-config-ollama-api-generate (starhugger-config-base-type-model starhugger-config-json-type-request)
+  ((url :initform "http://localhost:11434/api/generate")
+   (join-prompts
+    :initform "\n"
+    :documentation
+    "Ollama only supports a non-array single string for the \"prompt\" parameter.
+(Both \"/api/generate\" and \"/v1/completions\".)")))
 
 (cl-defmethod starhugger--request-make-input-data
   ((config starhugger-config-ollama-api-generate)
@@ -479,8 +518,11 @@ PREFIX, SUFFIX, CONTEXT, etc.")
    _num
    &allow-other-keys)
   `((model . ,(slot-value config 'model))
-    (prompt
-     . ,(or prompt (apply (slot-value config 'prompt-array-fn) config args)))
+    ,@(cond
+       (prompt
+        `((prompt . ,prompt)))
+       (:else
+        (apply (slot-value config 'prompt-params-fn) config args)))
     ,@(and suffix `((suffix . ,suffix)))
     (options ,@(alist-get 'options (slot-value config 'parameters)))
     (stream . :false)
@@ -491,11 +533,11 @@ PREFIX, SUFFIX, CONTEXT, etc.")
 
 ;;;;;; OpenAI-compatible API
 
-(defclass starhugger-config-openai-compat (starhugger-config-request-json) () :abstract t)
+(defclass starhugger-config-openai-compat (starhugger-config-json-type-request) () :abstract t)
 
 ;;;;;;; OpenAI-compatible base completions
 
-(defclass starhugger-config-openai-compat-base-completions (starhugger-config-openai-compat starhugger-config-model-base)
+(defclass starhugger-config-openai-compat-base-completions (starhugger-config-openai-compat starhugger-config-base-type-model)
   ((url :initform "http://localhost:11434/v1/completions")))
 
 (cl-defmethod starhugger--request-make-input-data
@@ -509,8 +551,11 @@ PREFIX, SUFFIX, CONTEXT, etc.")
    num
    &allow-other-keys)
   `((model . ,(slot-value config 'model))
-    (prompt
-     . ,(or prompt (apply (slot-value config 'prompt-array-fn) config args)))
+    ,@(cond
+       (prompt
+        `((prompt . ,prompt)))
+       (:else
+        (apply (slot-value config 'prompt-params-fn) config args)))
     ,@(and suffix `((suffix . ,suffix)))
     (echo . :false)
     (stream . :false)
@@ -526,7 +571,7 @@ PREFIX, SUFFIX, CONTEXT, etc.")
 
 ;;;;;;; OpenAI-compatible chat completions (instruct)
 
-(defclass starhugger-config-openai-compat-chat-completions (starhugger-config-openai-compat starhugger-config-model-instruct)
+(defclass starhugger-config-openai-compat-chat-completions (starhugger-config-openai-compat starhugger-config-instruct-type-model)
   ((url :initform "http://localhost:11434/v1/chat/completions")))
 
 (defun starhugger--instruct-unique-fill-placeholder (content)
@@ -535,47 +580,52 @@ PREFIX, SUFFIX, CONTEXT, etc.")
     ;; Repeat <FILL-FILL-...> as needed
     (cond
      ((string-search placeholder content)
-      (recur (concat "<FILL-" (substring placeholder 2))))
+      (recur (concat "<FILL-" (substring placeholder 1))))
      (:else
       placeholder))))
 
-(cl-defmethod starhugger-make-prompt-array-default
+(cl-defmethod starhugger-make-prompt-parameters-default
   ((config starhugger-config-openai-compat-chat-completions)
+   &rest
+   args
    &key
    prefix
    suffix
    context
-   language
-   filename
+   _language
+   _filename
    &allow-other-keys)
-  (-let* ((fill-placeholder
+  (-let* ((fill-placeholder-unique
            (starhugger--instruct-unique-fill-placeholder
             (concat context prefix suffix)))
           (uniquify-fill-placeholder-fn
-           (if (equal "<FILL>" fill-placeholder)
+           (if (equal "<FILL>" fill-placeholder-unique)
                #'identity
-             (lambda (str) (string-replace "<FILL>" fill-placeholder str))))
-          (language (or language (starhugger--guess-language-id)))
+             (lambda (str)
+               (string-replace "<FILL>" fill-placeholder-unique str))))
           (system-prompts
            (-map
             uniquify-fill-placeholder-fn (slot-value config 'system-prompts)))
+          ((&alist
+            'prefix formatted-prefix-with-context 'suffix formatted-suffix)
+           (apply
+            #'starhugger--format-prefix-suffix-prompts-with-optional-context
+            :always-format t args))
           (user-prompt
            (-->
-            "%s\n%s
-```%s
-%s
-```\n
-The replacement for <FILL> is:"
-            (funcall uniquify-fill-placeholder-fn it)
+            "%s
+The replacement for %s is:"
             (format it
-                    (or context "")
-                    (or filename "")
-                    (or language "")
-                    (concat prefix fill-placeholder suffix))
+                    (concat
+                     formatted-prefix-with-context
+                     fill-placeholder-unique
+                     formatted-suffix)
+                    fill-placeholder-unique)
             (string-trim it))))
     ;; OpenAI-compatible /chat/completions 's "messages" parameter
-    `[,@(--map `((role . "system") (content . ,it)) system-prompts)
-      ((role . "user") (content . ,user-prompt))]))
+    `((messages .
+                [,@(--map `((role . "system") (content . ,it)) system-prompts)
+                 ((role . "user") (content . ,user-prompt))]))))
 
 (cl-defmethod starhugger--request-make-input-data
   ((config starhugger-config-openai-compat-chat-completions)
@@ -588,22 +638,18 @@ The replacement for <FILL> is:"
    context
    num
    &allow-other-keys)
-  (-let* ((messages
+  (-let* ((messages-params
            (cond
             ((or (stringp prompt)
-                 (and (proper-list-p prompt) (< 0 (length prompt))))
-             `[,@(--map `((role . "system") (content . ,it))
-                        (slot-value config 'system-prompts))
-               ((role . "user") (content . ,prompt))])
+                 (and (proper-list-p prompt) (not (seq-empty-p prompt))))
+             `((messages .
+                         [,@(--map `((role . "system") (content . ,it))
+                                   (slot-value config 'system-prompts))
+                          ((role . "user") (content . ,prompt))])))
             (:else
-             (apply (slot-value config 'prompt-array-fn)
-                    config
-                    prefix
-                    suffix
-                    context
-                    args)))))
-    `((messages . ,messages)
-      (model . ,(slot-value config 'model))
+             (apply (slot-value config 'prompt-params-fn) config args)))))
+    `((model . ,(slot-value config 'model))
+      ,@messages-params
       (stream . :false)
       (n . ,(or num (slot-value config 'num)))
       ,@(slot-value config 'parameters))))
@@ -618,11 +664,11 @@ The replacement for <FILL> is:"
 
 (cl-defgeneric starhugger-query
     (config
+     prompt
      callback
      &rest
      args
      &key
-     prompt
      context
      prefix
      suffix
@@ -631,11 +677,11 @@ The replacement for <FILL> is:"
 
 (cl-defmethod starhugger-query
   ((config starhugger-config)
+   prompt
    callback
    &rest
    args
    &key
-   prompt
    context
    prefix
    suffix
@@ -658,8 +704,6 @@ The replacement for <FILL> is:"
     (when request-start-callback
       (funcall request-start-callback req))
     req))
-
-;;;;; Automatic prompting
 
 (cl-defun starhugger--prompt-prefix-suffix-from-buffer (config)
   (-let* ((code-len (slot-value config 'code-length))
@@ -697,6 +741,7 @@ The replacement for <FILL> is:"
 (cl-defun starhugger--prompt-components-from-buffer (config callback)
   "CALLBACK is called with :context :prefix :suffix."
   (-let* ((filename (starhugger--filename-relative-to-project))
+          (language (starhugger--guess-prog-language-name))
           ([prefix suffix]
            (starhugger--prompt-prefix-suffix-from-buffer config)))
     (funcall (slot-value config 'context-fn)
@@ -705,30 +750,33 @@ The replacement for <FILL> is:"
                (funcall callback
                         :context context
                         :filename filename
+                        :language language
                         :prefix prefix
                         :suffix suffix)))))
 
-(cl-defgeneric starhugger-query-auto-prompt (config callback &rest _))
-
-;; TODO: how to incorporate this into `starhugger-query'?
-
-(cl-defmethod starhugger-query-auto-prompt
+(cl-defmethod starhugger-query
   ((config starhugger-config)
+   (_prompt (eql 'buffer))
    callback
    &rest
    args
    &key
-   caller
    num
    &allow-other-keys)
   "CALLBACK is called with generated content choices & variadic info."
   (run-hooks 'starhugger-before-request-hook)
-  (-let* ((orig-buf (current-buffer))
-          (request-record nil))
+  (-let* ((orig-buf (current-buffer)))
     ;; Asynchronously construct prompt components
     (starhugger--prompt-components-from-buffer
      config
-     (starhugger--lambda (&rest async-prompt-result &key _context prefix suffix &allow-other-keys)
+     (starhugger--lambda (&rest
+                          async-prompt-result
+                          &key
+                          context
+                          filename
+                          prefix
+                          suffix
+                          &allow-other-keys)
        (-let* ((code-len (+ (length prefix) (length suffix)))
                ;; This callback is ran when the request to the language model
                ;; returns
@@ -736,9 +784,6 @@ The replacement for <FILL> is:"
                 (starhugger--lambda (processed-content-choices
                                      &rest request-do-result &key error &allow-other-keys)
                   (starhugger--with-live-buffer-or-current orig-buf
-                    (cl-callf
-                        (lambda (lst) (delete request-record lst))
-                        (gethash orig-buf (starhugger--running-request-table) '()))
                     (-let* ((err-str (format "%S" error)))
                       (when (and error starhugger-notify-request-error)
                         (message "`starhugger' response error: %s" err-str))
@@ -750,29 +795,29 @@ The replacement for <FILL> is:"
                  ((< 0 code-len)
                   (apply #'starhugger-query
                          config
+                         nil
                          request-do-callback
+                         :context context
+                         :filename filename
+                         :prefix prefix
+                         :suffix suffix
                          :num
                          num
                          async-prompt-result))
                  (:else
                   (funcall request-do-callback '())))))
-         (when (< 0 code-len)
-           (setq request-record (append request-obj `(:caller ,caller)))
-           (push request-record
-                 (gethash orig-buf (starhugger--running-request-table) '())))
-         request-record)))))
+         request-obj)))))
 
-(cl-defun starhugger--query-until-number (config num callback &rest _args &key query-fn query-args &allow-other-keys)
+(cl-defun starhugger--query-until-number (config num callback &rest args &key query-kwargs &allow-other-keys)
   "Using CONFIG, keep querying until NUM of returned choices are achieved.
 CALLBACK is called (potentially) multiple time, each time with the
 returned choices returned from a request, number of accumulated
 choices (including the just returned ones), and the variable rest are
 keyword information.  When CALLBACK returns nil, target is reached, or
 an error is returned, stop querying.  QUERY-FN: a querying function such
-as `starhugger-query' or `starhugger-query-auto-prompt', QUERY-ARGS:
-variadic arguments for QUERY-FN."
-  (-let* ((target-num num)
-          (query-fn (or query-fn #'starhugger-query)))
+as `starhugger-query' or `starhugger-query-auto-prompt', QUERY-KWARGS:
+variadic keyword arguments for QUERY-FN.  ARGS is variadic."
+  (-let* ((target-num num))
     (letrec ((fetching-loop
               (lambda (this-time-num old-accumulated-num)
                 (-let* ((query-fn-callback
@@ -797,12 +842,13 @@ variadic arguments for QUERY-FN."
                                         (null cb-result)
                                         (<= next-time-num 0)))
                                (funcall fetching-loop next-time-num))))))
-                  (apply query-fn
+                  (apply #'starhugger-query
                          config
+                         (plist-get query-kwargs :prompt)
                          query-fn-callback
                          :num
                          this-time-num
-                         query-args)))))
+                         query-kwargs)))))
       (funcall fetching-loop target-num 0))))
 
 ;;; starhugger-core.el ends here

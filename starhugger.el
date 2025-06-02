@@ -323,13 +323,13 @@ will (re-)apply for all."
   (starhugger-config-openai-compat-base-completions
    :model
    (or starhugger-model-id "qwen2.5-coder:14b-base")
-   :join-prompts " "
+   :join-prompts "\n"
    :num 3))
 (defvar starhugger-auto-config-instance
   (starhugger-config-openai-compat-base-completions
    :model
    (or starhugger-model-id "qwen2.5-coder:3b-base")
-   :join-prompts " "))
+   :join-prompts "\n"))
 
 ;;;###autoload
 (cl-defun starhugger-trigger-suggestion (&key interact callback config &allow-other-keys)
@@ -376,7 +376,7 @@ to multiple fetches."
         (:else
          (with-current-buffer orig-buf
            (-when-let* ((_ (< 0 (length content-choices)))
-                        (1st-choice (seq-first content-choices))
+                        (1st-choice (starhugger--seq-first content-choices))
                         ;; Only display and continue when didn't move or
                         ;; interactive, in that case we are explicitly waiting
                         (_ (or interact (= orig-pt (point)))))
