@@ -270,13 +270,43 @@ ERROR are passed to `request'."
 
 ;;;;;; Default function slots
 
-(cl-defun starhugger--context-dummy (_filename _prefix _suffix callback &rest _)
-  "Unimplemented reference, just call CALLBACK with nil instead of queried context."
+(cl-defun starhugger--context-dummy (callback &rest args &key _filename _prefix _suffix &allow-other-keys)
+  "Unimplemented reference, call CALLBACK with nil instead of queried context.
+ARGS: unused."
   (apply callback nil '()))
 
 (cl-defgeneric starhugger-make-prompt-parameters-default
     (_config
      &rest args &key prefix _suffix _context _filename &allow-other-keys))
+
+(cl-defun starhugger--prompt-prefix-suffix-from-buffer (code-length suffix-fraction)
+  (-let* ((intend-suffix-len (floor (* code-length suffix-fraction)))
+          (intend-prefix-len (- code-length intend-suffix-len))
+          (avail-prefix-len (- (point) (point-min)))
+          (avail-suffix-len (- (point-max) (point)))
+          ([beg-of-prefix end-of-suffix]
+           (cond
+            ((and (> avail-prefix-len intend-prefix-len)
+                  (< avail-suffix-len intend-suffix-len))
+             (vector (- (point) (- code-length avail-suffix-len)) (point-max)))
+            ((and (< avail-prefix-len intend-prefix-len)
+                  (> avail-suffix-len intend-suffix-len))
+             (vector (point-min) (+ (point) (- code-length avail-prefix-len))))
+            (t
+             (vector
+              (- (point) intend-prefix-len) (+ (point) intend-suffix-len)))))
+          ([beg-of-prefix end-of-suffix]
+           (vector
+            (max (point-min) beg-of-prefix) (min (point-max) end-of-suffix)))
+          (prefix-str
+           (-->
+            (buffer-substring-no-properties beg-of-prefix (point))
+            (string-trim-left it "[\n\r]+")))
+          (suffix-str
+           (-->
+            (buffer-substring-no-properties (point) end-of-suffix)
+            (string-trim-right it "[\n\r]+"))))
+    (vector prefix-str suffix-str)))
 
 ;;;;;; Generic classes
 
@@ -327,6 +357,38 @@ with the context string), the rest are ignored at the moment.")
     :initform []
     :type sequence
     :documentation "Sequence of system prompts.")
+   (role-system
+    :initarg :role-system
+    :initform "system"
+    :documentation "For instruction-tuned models's \"message\" parameter's system prompt,
+value of the \"field\".  For some models the value is \"developer\".")
+   (role-user :initarg :role-user :initform "user")
+   (other-prompts
+    :initarg :other-prompts
+    :initform []
+    :type sequence
+    :documentation
+    "Sequence of messages before the final user prompt, after system prompts.
+Each element is an alist, each alist contains at least 2 keys: role and
+content.  See
+https://platform.openai.com/docs/api-reference/chat/create#chat-create-messages.
+This is the more flexible version of the 'system-prompts slot, but still
+only (singular) string are supported.
+
+Example:
+
+:other-prompts
+'(((role . \"user\")
+   (content . \"(define (odd? n) (<FILL>))\"))
+  ((role . \"assistant\")
+   (content . \"not (= 0 (% n 2))\"))
+  ((role .  \"user\")
+   (content .  \";; Predicate function to check if a number is non-negative\"))
+  ((role . \"assistant\")
+   (content . \"\\n(define (non-negative? n) (<= 0 n))\")))
+
+The above is only used for instruction-tuned models, since FIM models
+don't need examples to perform completing.")
    (join-prompts
     :initarg :join-prompts
     :initform nil
@@ -363,12 +425,13 @@ Each element can be:
 (defvar starhugger-instruct-default-system-prompts
   '(
     "You are a code/text completion expert. Your task is to fill in missing code or text.
-The input format uses <FILL> to mark where content should be inserted.
-
-Requirements:
+The input format uses <FILL> to mark where content should be inserted."
+    ;; This may hurt completing in real Markdown files
+    "Requirements:
 - Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments.
-- Do NOT include markdown formatting, code blocks, or any other wrappers.
-- The provided markdown markers are just for clarify, do NOT include them in your answer.
+- Answer in the programming language of the provided code, not automatically defaulting to Markdown with code blocks.
+- Do NOT include Markdown formatting markers (```...```), code blocks, or any other wrappers.
+- The provided Markdown markers are just for clarify, do NOT include them in your answer.
 - Include comments in the respective programming language's syntax when needed.
 - Do NOT repeat any surrounding text, nor make any changes to them.
 - If you want to add remarks about fixes or improvements, write them as syntactic comments inside <FILL> instead of modifying.
@@ -422,8 +485,6 @@ with many more functions.")
    starhugger-post-process-default-chain
    (seq-into (slot-value obj 'post-process) 'list)))
 
-
-
 ;;;;;; Generic methods
 
 (cl-defgeneric starhugger--choices-from-response-data (_config data))
@@ -442,11 +503,36 @@ PREFIX, SUFFIX, CONTEXT, etc."))
     (config
      callback &rest args &key prefix suffix context num &allow-other-keys))
 
-(cl-defgeneric starhugger--prompt-components-from-buffer
-    (config callback &optional context-fn &rest args)
-  (:documentation "CALLBACK is called with :context :prefix :suffix."))
-
-(cl-defgeneric starhugger--prompt-prefix-suffix-from-buffer (config))
+(cl-defgeneric starhugger-prompt-components-from-buffer
+    (_config
+     callback
+     &rest
+     args
+     &key
+     context-fn
+     code-length
+     suffix-fraction
+     &allow-other-keys)
+  (:documentation "CALLBACK is called with :context :prefix :suffix.")
+  (-let* ((filename (starhugger--filename-relative-to-project))
+          (language (starhugger--guess-prog-language-name))
+          ([prefix suffix]
+           (starhugger--prompt-prefix-suffix-from-buffer
+            code-length suffix-fraction))
+          (plist
+           (list
+            :filename filename
+            :language language
+            :prefix prefix
+            :suffix suffix))
+          (context-callback
+           (starhugger--lambda
+             (context &rest _) (apply callback :context context plist))))
+    (cond
+     (context-fn
+      (apply context-fn context-callback plist))
+     (:else
+      (apply context-callback nil plist)))))
 
 ;;;;;;; Default methods
 
@@ -499,6 +585,17 @@ PREFIX, SUFFIX, CONTEXT, etc."))
       (starhugger-request-table-record request-obj buffer)
       request-obj)))
 
+(cl-defmethod starhugger-prompt-components-from-buffer
+  ((config starhugger-config) callback &rest args &key &allow-other-keys)
+  (apply #'cl-call-next-method
+         config
+         callback
+         :context-fn (starhugger-get config 'context-fn)
+         :code-length (starhugger-get config 'code-length)
+         :suffix-fraction
+         (starhugger-get config 'suffix-fraction)
+         args))
+
 (cl-defun starhugger--format-prefix-suffix-prompts-with-optional-context
     (&key always-format context prefix suffix language filename &allow-other-keys)
   (-let* ((format-flag
@@ -525,7 +622,6 @@ PREFIX, SUFFIX, CONTEXT, etc."))
               (new-suffix (format suffix-format suffix)))
         `((prefix . ,new-prefix) (suffix . ,new-suffix)))))))
 
-;; For base models, not sure how to handle repo context, if any
 (cl-defmethod starhugger-make-prompt-parameters-default
   ((config starhugger-config-base-type-model)
    &rest
@@ -665,8 +761,40 @@ PREFIX, SUFFIX, CONTEXT, etc."))
      (:else
       placeholder))))
 
+(cl-defun starhugger--make-preprocessed-instruct-prompts (config
+                                                          &rest args &key prefix suffix context _language _filename &allow-other-keys)
+  (-let* ((fill-placeholder-unique
+           (starhugger--instruct-unique-fill-placeholder
+            (concat context prefix suffix)))
+          (uniquify-fill-placeholder-fn
+           (if (equal "<FILL>" fill-placeholder-unique)
+               #'identity
+             (lambda (str)
+               (string-replace "<FILL>" fill-placeholder-unique str))))
+          (system-prompts-1
+           (-map
+            uniquify-fill-placeholder-fn
+            (starhugger-get config 'system-prompts)))
+          ((&alist
+            'prefix formatted-prefix-with-context 'suffix formatted-suffix)
+           (apply
+            #'starhugger--format-prefix-suffix-prompts-with-optional-context
+            :always-format t args))
+          (user-prompt
+           (-->
+            "%s
+The replacement for %s is:"
+            (format it
+                    (concat
+                     formatted-prefix-with-context
+                     fill-placeholder-unique
+                     formatted-suffix)
+                    fill-placeholder-unique)
+            (string-trim it))))
+    `((system . ,system-prompts-1) (user . [,user-prompt]))))
+
 (cl-defmethod starhugger-make-prompt-parameters-default
-  ((config starhugger-config-openai-compat-chat-completions)
+  ((config starhugger-config-instruct-type-model)
    &rest
    args
    &key
@@ -676,17 +804,26 @@ PREFIX, SUFFIX, CONTEXT, etc."))
    _language
    _filename
    &allow-other-keys)
-  (-let* ((fill-placeholder-unique
+  (-let* ((system-prompts (starhugger-get config 'system-prompts))
+          (fill-placeholder-unique
            (starhugger--instruct-unique-fill-placeholder
             (concat context prefix suffix)))
-          (uniquify-fill-placeholder-fn
+          (uniquify-<FILL>
            (if (equal "<FILL>" fill-placeholder-unique)
                #'identity
              (lambda (str)
-               (string-replace "<FILL>" fill-placeholder-unique str))))
-          (system-prompts
+               ;; Only support simple string content, leave others such as array
+               (if (stringp str)
+                   (string-replace "<FILL>" fill-placeholder-unique str)
+                 str))))
+          (system-prompts* (-map uniquify-<FILL> system-prompts))
+          (other-prompts*
            (-map
-            uniquify-fill-placeholder-fn (starhugger-get config 'system-prompts)))
+            (lambda (alist)
+              (setf (alist-get 'content alist)
+                    (funcall uniquify-<FILL> (alist-get 'content alist)))
+              alist)
+            (starhugger-get config 'other-prompts)))
           ((&alist
             'prefix formatted-prefix-with-context 'suffix formatted-suffix)
            (apply
@@ -705,8 +842,12 @@ The replacement for %s is:"
             (string-trim it))))
     ;; OpenAI-compatible /chat/completions 's "messages" parameter
     `((messages .
-                [,@(--map `((role . "system") (content . ,it)) system-prompts)
-                 ((role . "user") (content . ,user-prompt))]))))
+                (,@(--map `((role . ,(starhugger-get config 'role-system))
+                            (content . ,it))
+                          system-prompts*)
+                 ,@other-prompts*
+                 ((role . ,(starhugger-get config 'role-user))
+                  (content . ,user-prompt)))))))
 
 (cl-defmethod starhugger--request-make-input-data
   ((config starhugger-config-openai-compat-chat-completions)
@@ -790,57 +931,6 @@ Including :error."))
                   :buffer buffer args)))
     req))
 
-(cl-defmethod starhugger--prompt-prefix-suffix-from-buffer
-  ((config starhugger-config))
-  (-let* ((code-len (slot-value config 'code-length))
-          (suf-frac (slot-value config 'suffix-fraction)))
-    (-let* ((intend-suffix-len (floor (* code-len suf-frac)))
-            (intend-prefix-len (- code-len intend-suffix-len))
-            (avail-prefix-len (- (point) (point-min)))
-            (avail-suffix-len (- (point-max) (point)))
-            ([beg-of-prefix end-of-suffix]
-             (cond
-              ((and (> avail-prefix-len intend-prefix-len)
-                    (< avail-suffix-len intend-suffix-len))
-               (vector (- (point) (- code-len avail-suffix-len)) (point-max)))
-              ((and (< avail-prefix-len intend-prefix-len)
-                    (> avail-suffix-len intend-suffix-len))
-               (vector (point-min) (+ (point) (- code-len avail-prefix-len))))
-              (t
-               (vector
-                (- (point) intend-prefix-len) (+ (point) intend-suffix-len)))))
-            ([beg-of-prefix end-of-suffix]
-             (vector
-              (max (point-min) beg-of-prefix) (min (point-max) end-of-suffix)))
-            (prefix-str
-             (-->
-              (buffer-substring-no-properties
-               beg-of-prefix (point))
-              (string-trim-left it "[\n\r]+")))
-            (suffix-str
-             (-->
-              (buffer-substring-no-properties
-               (point) end-of-suffix)
-              (string-trim-right it "[\n\r]+"))))
-      (vector prefix-str suffix-str))))
-
-;; TODO: make this more generic
-(cl-defmethod starhugger--prompt-components-from-buffer
-  ((config starhugger-config) callback &optional context-fn &rest args)
-  (-let* ((filename (starhugger--filename-relative-to-project))
-          (language (starhugger--guess-prog-language-name))
-          ([prefix suffix]
-           (starhugger--prompt-prefix-suffix-from-buffer config)))
-    (funcall (or context-fn (slot-value config 'context-fn))
-             filename prefix suffix
-             (lambda (context &rest _)
-               (funcall callback
-                        :context context
-                        :filename filename
-                        :language language
-                        :prefix prefix
-                        :suffix suffix)))))
-
 (cl-defmethod starhugger-query
   ((config starhugger-config)
    (_prompt (eql 'buffer))
@@ -852,7 +942,7 @@ Including :error."))
    &allow-other-keys)
   (-let* ((orig-buf (current-buffer)))
     ;; Asynchronously construct prompt components
-    (starhugger--prompt-components-from-buffer
+    (starhugger-prompt-components-from-buffer
      config
      (starhugger--lambda (&rest async-prompt-result &key context prefix suffix &allow-other-keys)
        (-let* ((code-len (+ (length prefix) (length suffix)))
