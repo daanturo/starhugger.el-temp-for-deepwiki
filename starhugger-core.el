@@ -185,7 +185,7 @@ Else return as-is."
      (:else
       text))))
 
-(defvar starhugger-post-process-chain-default
+(defvar starhugger-post-process-default-chain
   `(
     ;; Remove reasoning models's thinking tokens
     ("\\(\n?\\|^\\)<think>[^z-a]*?</think>[ \t\n\r]*" "")
@@ -196,7 +196,10 @@ post-processing.
 Each element can be:
 - A variadic function whose arguments are (generated-text &rest _) and returns
   the processed text.
-- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.")
+- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.
+
+This list should be modified before creating config instances, if the
+config inherits it - the default unless specified otherwise.")
 
 (defvar starhugger-notify-request-error t
   "Whether to notify if an error was thrown when the request is completed.")
@@ -213,24 +216,56 @@ Each element can be:
    (:else
     (apply fn proc event args))))
 
-(cl-defun starhugger--request-el-request (url &rest settings &key error &allow-other-keys)
-  "Wrapper around (`request' URL @SETTINGS)."
-  (declare (indent defun))
-  (-let* ((req-response
-           (apply #'request url :error (or error #'ignore) settings))
-          (req-buf (request-response--buffer req-response)))
-    ;;  Silence errors when aborting, see https://github.com/tkf/emacs-request/issues/226.
-    (add-function :around
-                  (process-sentinel
-                   (get-buffer-process (request-response--buffer req-response)))
-                  #'starhugger--request-el--silent-sentinel-a)
-    (list
-     :request-response req-response
-     :process (get-buffer-process req-buf)
-     :cancel-fn (lambda () (request-abort req-response)))))
+(defvar starhugger--running-request-table--table
+  (make-hash-table :test #'equal))
+(defun starhugger--running-request-table ()
+  "Return a hash table of buffer - running requests.
+Hash table key: buffer.  Hash table value: list of plists.
 
-(defun starhugger--cancel-request (plist)
-  (-let* (((&plist :cancel-fn cancel-fn :process process) plist))
+Each plist has at least those properties:
+- :cancel-fn - function called with 0 arguments to terminate the process
+Optionally:
+- :caller - the request' caller
+- :process - network process
+- :request-response - return value of the underlying HTTP library's function
+  call.
+
+When performing a relevant request, add the plist to this table under
+the corresponding buffer key so that starhugger can terminate them."
+  starhugger--running-request-table--table)
+
+(defun starhugger-request-table-record (obj buf)
+  (push obj (gethash buf (starhugger--running-request-table))))
+
+(defun starhugger-request-table-remove (obj buf)
+  (cl-callf
+      (lambda (obj-list) (delete obj obj-list))
+      (gethash buf (starhugger--running-request-table) '())))
+
+(cl-defun starhugger--request-el-request (url &rest settings &key error &allow-other-keys)
+  "Wrapper around (`request' URL @SETTINGS).
+ERROR are passed to `request'."
+  (declare (indent defun))
+  (-let*
+      ((req-response
+        (apply #'request url :error (or error #'ignore) settings))
+       (req-buf (request-response--buffer req-response))
+       ;;  Silence errors when aborting, see https://github.com/tkf/emacs-request/issues/226.
+       (_
+        (add-function :around
+                      (process-sentinel
+                       (get-buffer-process
+                        (request-response--buffer req-response)))
+                      #'starhugger--request-el--silent-sentinel-a))
+       (retval
+        (list
+         :request-response req-response
+         :process (get-buffer-process req-buf)
+         :cancel-fn (lambda () (request-abort req-response)))))
+    retval))
+
+(defun starhugger--cancel-request (obj)
+  (-let* (((&plist :cancel-fn cancel-fn :process process) obj))
     (when process
       (add-function :around
                     (process-sentinel process)
@@ -246,7 +281,6 @@ Each element can be:
             (when proc-buf
               (kill-buffer proc-buf)))))))))
 
-
 ;;;;; Generic
 
 ;;;;;; Default function slots
@@ -258,6 +292,9 @@ Each element can be:
 (cl-defgeneric starhugger-make-prompt-parameters-default
     (_config
      &rest args &key prefix _suffix _context _filename &allow-other-keys))
+
+;; TODO: Like a hook, let t in 'post-process, 'system-prompts to present dynamic
+;; global value
 
 ;;;;;; Generic classes
 
@@ -346,12 +383,17 @@ The input format uses <FILL> to mark where content should be inserted.
 
 Requirements:
 - Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
-- Do NOT include markdown formatting, code blocks, or any other wrapper; the provided markdown markers are just for clarify, don't include them in your answer
-- Do NOT repeat any surrounding text
-- Include comments in the respective programming language's syntax when needed, also if you want to add remarks write them as comments
+- Do NOT include markdown formatting, code blocks, or any other wrappers
+- The provided markdown markers are just for clarify, do NOT include them in your answer
+- Include comments in the respective programming language's syntax when needed
+- Do NOT repeat any surrounding text, nor make any changes to them
+- If you want to add remarks about fixes or improvements, write them as syntactic comments inside <FILL> instead of modifying
 - Ensure proper indentation and formatting of the surrounding code
 - The fill may not always be composed of multiple lines, it may be just a part of a line
-- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it"))
+- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it")
+  "Default system prompts for instruct-tuned models.
+This list should be modified before creating config instances, if the
+config inherits it - the default unless specified otherwise.")
 
 (defclass starhugger-config-instruct-type-model (starhugger-config) () :abstract t)
 (cl-defmethod initialize-instance :after
@@ -361,7 +403,7 @@ Requirements:
           starhugger-instruct-default-system-prompts))
   (when (equal [] (slot-value instance 'post-process))
     (setf (slot-value instance 'post-process)
-          starhugger-post-process-chain-default)))
+          starhugger-post-process-default-chain)))
 
 (defclass starhugger-config-json-type-request (starhugger-config) () :abstract t)
 
@@ -373,15 +415,20 @@ Requirements:
   str)
 
 (cl-defgeneric starhugger--request-make-input-data
-    (_config &rest _args &key _prompt _prefix _suffix &allow-other-keys)
+    (config &rest args &key prompt prefix suffix &allow-other-keys)
   (:documentation
-   ".
+   "Construct the request's sending data, in lisp.
 If the PROMPT argument is non-nil, prefer it over constructing from
 PREFIX, SUFFIX, CONTEXT, etc."))
 
 (cl-defgeneric starhugger--perform-request
     (config
      callback &rest args &key prefix suffix context num &allow-other-keys))
+
+(cl-defgeneric starhugger--prompt-components-from-buffer (config callback)
+  (:documentation "CALLBACK is called with :context :prefix :suffix."))
+
+(cl-defgeneric starhugger--prompt-prefix-suffix-from-buffer (config))
 
 ;;;;;;; Default methods
 
@@ -391,6 +438,8 @@ PREFIX, SUFFIX, CONTEXT, etc."))
    &rest
    args
    &key
+   buffer
+   caller
    &allow-other-keys)
   (let* ((time-beg (current-time))
          (url (slot-value config 'url))
@@ -400,31 +449,37 @@ PREFIX, SUFFIX, CONTEXT, etc."))
             ,@(and api-key `(("Authorization" . ,(format "Bearer %s" api-key))))))
          (data-in-lisp
           (apply #'starhugger--request-make-input-data config args))
-         (data-in-str (starhugger--json-serialize data-in-lisp)))
-    (starhugger--log-request-data url data-in-lisp time-beg)
-    (starhugger--request-el-request
-      url
-      :type "POST"
-      :headers headers
-      :parser (lambda () (json-parse-buffer :object-type 'alist))
-      :data data-in-str
-      :complete
-      (starhugger--lambda (&rest result &key data error-thrown &allow-other-keys)
-        (-let* ((time-end (current-time))
-                (data-out-lisp data)
-                (content-choices
-                 (if error-thrown
-                     '()
-                   (starhugger--choices-from-response-data config data-out-lisp))))
-          (unwind-protect
-              (funcall callback
-                       content-choices
-                       :error
-                       (and error-thrown
-                            `((error-thrown ,error-thrown)
-                              (data-out-lisp ,data-out-lisp))))
-            (starhugger--log-request-data url data-out-lisp time-beg
-                                          time-end)))))))
+         (data-in-str (starhugger--json-serialize data-in-lisp))
+         (_ (starhugger--log-request-data url data-in-lisp time-beg)))
+    (letrec ((request-obj
+              (starhugger--request-el-request
+                url
+                :type "POST"
+                :headers headers
+                :parser (lambda () (json-parse-buffer :object-type 'alist))
+                :data data-in-str
+                :complete
+                (starhugger--lambda (&rest result &key data error-thrown &allow-other-keys)
+                  (starhugger-request-table-remove request-obj buffer)
+                  (-let* ((time-end (current-time))
+                          (data-out-lisp data)
+                          (content-choices
+                           (if error-thrown
+                               '()
+                             (starhugger--choices-from-response-data
+                              config data-out-lisp))))
+                    (unwind-protect
+                        (funcall callback
+                                 content-choices
+                                 :error
+                                 (and error-thrown
+                                      `((error-thrown ,error-thrown)
+                                        (data-out-lisp ,data-out-lisp))))
+                      (starhugger--log-request-data url data-out-lisp time-beg
+                                                    time-end)))))))
+      (setq request-obj (plist-put request-obj :caller caller))
+      (starhugger-request-table-record request-obj buffer)
+      request-obj)))
 
 (cl-defun starhugger--format-prefix-suffix-prompts-with-optional-context
     (&key always-format context prefix suffix language filename &allow-other-keys)
@@ -458,7 +513,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
    &rest
    args
    &key
-   prefix
+   _prefix
    _suffix
    _context
    _language
@@ -484,14 +539,22 @@ PREFIX, SUFFIX, CONTEXT, etc."))
 
 (cl-defmethod starhugger--post-process-do ((config starhugger-config) str)
   (named-let
-      recur ((retval str) (chain (slot-value config 'post-process)))
+      recur
+      ((retval str)
+       (chain
+        (append
+         '(
+           ;; Carriage returns
+           ("\r" ""))
+         (slot-value config 'post-process))))
     (-let* ((op (starhugger--seq-first chain)))
       (cond
        ((seq-empty-p chain)
         retval)
        ((and (listp op) (= 2 (length op)) (-every #'stringp op))
         (recur
-         (replace-regexp-in-string (nth 0 op) (nth 1 op) retval) (seq-rest chain)))
+         (replace-regexp-in-string (nth 0 op) (nth 1 op) retval)
+         (seq-rest chain)))
        ((functionp op)
         (recur (funcall op retval) (seq-rest chain)))))))
 
@@ -633,9 +696,9 @@ The replacement for %s is:"
    args
    &key
    prompt
-   prefix
-   suffix
-   context
+   _prefix
+   _suffix
+   _context
    num
    &allow-other-keys)
   (-let* ((messages-params
@@ -673,7 +736,10 @@ The replacement for %s is:"
      prefix
      suffix
      num
-     &allow-other-keys))
+     &allow-other-keys)
+  (:documentation
+   "CALLBACK is called with generated content choices & variadic info.
+Including :error."))
 
 (cl-defmethod starhugger-query
   ((config starhugger-config)
@@ -685,11 +751,13 @@ The replacement for %s is:"
    context
    prefix
    suffix
+   buffer
+   caller
    _num
-   request-start-callback
    &allow-other-keys)
   (cl-assert (or prompt prefix suffix context))
-  (-let* ((req
+  (-let* ((buffer (or buffer (current-buffer)))
+          (req
            (apply #'starhugger--perform-request
                   config
                   (starhugger--lambda (content-choices
@@ -700,12 +768,12 @@ The replacement for %s is:"
                       (apply callback
                              processed-content-choices
                              perform-request-result)))
-                  args)))
-    (when request-start-callback
-      (funcall request-start-callback req))
+                  :caller (or caller #'starhugger-query)
+                  :buffer buffer args)))
     req))
 
-(cl-defun starhugger--prompt-prefix-suffix-from-buffer (config)
+(cl-defmethod starhugger--prompt-prefix-suffix-from-buffer
+  ((config starhugger-config))
   (-let* ((code-len (slot-value config 'code-length))
           (suf-frac (slot-value config 'suffix-fraction)))
     (-let* ((intend-suffix-len (floor (* code-len suf-frac)))
@@ -738,8 +806,8 @@ The replacement for %s is:"
               (string-trim-right it "[\n\r]+"))))
       (vector prefix-str suffix-str))))
 
-(cl-defun starhugger--prompt-components-from-buffer (config callback)
-  "CALLBACK is called with :context :prefix :suffix."
+(cl-defmethod starhugger--prompt-components-from-buffer
+  ((config starhugger-config) callback)
   (-let* ((filename (starhugger--filename-relative-to-project))
           (language (starhugger--guess-prog-language-name))
           ([prefix suffix]
@@ -763,7 +831,6 @@ The replacement for %s is:"
    &key
    num
    &allow-other-keys)
-  "CALLBACK is called with generated content choices & variadic info."
   (run-hooks 'starhugger-before-request-hook)
   (-let* ((orig-buf (current-buffer)))
     ;; Asynchronously construct prompt components
@@ -780,7 +847,7 @@ The replacement for %s is:"
        (-let* ((code-len (+ (length prefix) (length suffix)))
                ;; This callback is ran when the request to the language model
                ;; returns
-               (request-do-callback
+               (query-callback
                 (starhugger--lambda (processed-content-choices
                                      &rest request-do-result &key error &allow-other-keys)
                   (starhugger--with-live-buffer-or-current orig-buf
@@ -796,7 +863,7 @@ The replacement for %s is:"
                   (apply #'starhugger-query
                          config
                          nil
-                         request-do-callback
+                         query-callback
                          :context context
                          :filename filename
                          :prefix prefix
@@ -805,7 +872,7 @@ The replacement for %s is:"
                          num
                          async-prompt-result))
                  (:else
-                  (funcall request-do-callback '())))))
+                  (funcall query-callback '())))))
          request-obj)))))
 
 (cl-defun starhugger--query-until-number (config num callback &rest args &key query-kwargs &allow-other-keys)
@@ -816,7 +883,9 @@ choices (including the just returned ones), and the variable rest are
 keyword information.  When CALLBACK returns nil, target is reached, or
 an error is returned, stop querying.  QUERY-FN: a querying function such
 as `starhugger-query' or `starhugger-query-auto-prompt', QUERY-KWARGS:
-variadic keyword arguments for QUERY-FN.  ARGS is variadic."
+variadic keyword arguments for QUERY-FN, whose :prompt property will be
+used on `starhugger-query''s PROMPT argument.  ARGS are variadic keyword
+arguments."
   (-let* ((target-num num))
     (letrec ((fetching-loop
               (lambda (this-time-num old-accumulated-num)

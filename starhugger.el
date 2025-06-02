@@ -69,6 +69,10 @@ For `starhugger-auto-mode'."
 (defvar starhugger-model-id nil
   "Obsolete, retain for old configurations.")
 (make-obsolete-variable 'starhugger-model-id nil "0.7.0")
+(when starhugger-model-id
+  (display-warning 'starhugger "The global `starhugger-model-id' is obsolete, please configure \
+`starhugger-auto-config-instance' and \
+`starhugger-interactive-config-instance' instead."))
 
 (defface starhugger-inline-suggestion-face
   '((t
@@ -311,31 +315,28 @@ will (re-)apply for all."
       (starhugger--init-overlay recent-suggt pt))
     recent-suggt))
 
-(defvar starhugger--running-request-table--table nil
-  "Keys are buffers.")
-(defun starhugger--running-request-table ()
-  (unless starhugger--running-request-table--table
-    (setq starhugger--running-request-table--table
-          (make-hash-table :test #'equal)))
-  starhugger--running-request-table--table)
-
+;; Temporarily depend on `starhugger-model-id' to not break configurations so
+;; suddenly
 (defvar starhugger-interactive-config-instance
-  (starhugger-config-openai-compat-base-completions
+  (starhugger-config-openai-compat-chat-completions
    :model
-   (or starhugger-model-id "qwen2.5-coder:14b-base")
-   :join-prompts "\n"
-   :num 3))
+   (or starhugger-model-id "gemma3:12b")
+   :code-length 8192
+   :num 3
+   :join-prompts "\n"))
 (defvar starhugger-auto-config-instance
   (starhugger-config-openai-compat-base-completions
    :model
-   (or starhugger-model-id "qwen2.5-coder:3b-base")
+   (or starhugger-model-id "qwen2.5-coder:4b-base")
+   :num 1
+   :code-length 1024
    :join-prompts "\n"))
 
 ;;;###autoload
 (cl-defun starhugger-trigger-suggestion (&key interact callback config &allow-other-keys)
   "Show code suggestions as overlay(s).
-CONFIG: a `starhugger-config' instance, interactively defaults to
-`starhugger-interactive-config-instance', else
+CONFIG: a variable `starhugger-config' class instance, interactively
+defaults to `starhugger-interactive-config-instance', else defaults to
 `starhugger-auto-config-instance'.  This command tries to request
 CONFIG's :num completion choices in total.  When an inline suggestion is
 already displayed and there are more fetched choices,
@@ -354,12 +355,11 @@ to multiple fetches."
           (orig-pt (point))
           (state (starhugger--suggestion-positional-state))
           (target-num (slot-value config 'num))
-          (spin-stop-maybe
+          (stop-spin
            (or (and interact
                     starhugger-enable-spinner
                     (starhugger--spinner-start))
-               #'ignore))
-          (request-record nil))
+               #'ignore)))
     (starhugger--query-until-number
      config target-num
      (starhugger--lambda (content-choices
@@ -386,21 +386,14 @@ to multiple fetches."
              (when (= accumulated-num (length content-choices))
                (starhugger--init-overlay 1st-choice orig-pt)))
            (when (or error (<= target-num accumulated-num))
-             (cl-callf
-                 (lambda (lst) (delete request-record lst))
-                 (gethash orig-buf (starhugger--running-request-table) '()))
-             (funcall spin-stop-maybe))
+             (funcall stop-spin))
            (when (not (starhugger--active-overlay-p))
              (starhugger--ensure-inlininng-mode 0))))))
-     :caller #'starhugger-trigger-suggestion)))
-
-;; NOTE TODO PROBLEM: Trying record the request, to cancel them when needed.
-;; But the chain looks like this:
-
-;; Trigger -> Async context prompt starts -> Async context prompt ends -> Async
-;; LM request starts (*) -> Async LM request ends, content choices
-
-;; It's impossible(?) to get the LM request object when it starts.
+     :query-kwargs
+     (list
+      :caller #'starhugger-trigger-suggestion
+      :buffer orig-buf
+      :prompt 'buffer))))
 
 (defun starhugger--triggger-suggestion-prefer-cache
     (in-buffer position &optional cache-only callback)
@@ -410,9 +403,9 @@ to multiple fetches."
           (starhugger--cancel-requests-in-buffer
            (current-buffer)
            nil
-           (lambda (request-plist)
+           (lambda (request-obj)
              (member
-              (plist-get request-plist :caller)
+              (plist-get request-obj :caller)
               '(starhugger-trigger-suggestion))))
           ;; TODO: prevent spamming requests
           (when starhugger-debug
@@ -429,28 +422,30 @@ to multiple fetches."
            :callback callback
            :config starhugger-auto-config-instance)))))
 
-(defun starhugger--cancel-requests-in-buffer
-    (buf &optional plist-lst plist-pred)
-  (-let* ((plist-lst
-           (or plist-lst (gethash buf (starhugger--running-request-table) '())))
-          (new-plist-lst
+(cl-defun starhugger--cancel-requests-in-buffer (buf &optional request-obj-lst
+                                                     (cancel-pred #'always))
+  (-let* ((request-obj-lst
+           (or request-obj-lst
+               (gethash buf (starhugger--running-request-table) '())))
+          (uncancelled-request-obj-lst
            (-remove
-            (lambda (plist)
+            (lambda (obj)
               (cond
-               ((or (null plist-pred) (funcall plist-pred plist))
-                (starhugger--cancel-request plist)
+               ((funcall cancel-pred obj)
+                (starhugger--cancel-request obj)
                 t)
                (:else
                 nil)))
-            plist-lst)))
-    (puthash buf new-plist-lst (starhugger--running-request-table))))
+            request-obj-lst)))
+    (puthash
+     buf uncancelled-request-obj-lst (starhugger--running-request-table))))
 
 (defun starhugger-cancel-all-requests-globally ()
   "Terminate running requests in all buffers."
   (interactive)
   (maphash
-   (lambda (buf plist-lst)
-     (starhugger--cancel-requests-in-buffer buf plist-lst))
+   (lambda (buf obj-lst)
+     (starhugger--cancel-requests-in-buffer buf obj-lst))
    (starhugger--running-request-table)))
 
 (cl-defun starhugger-dismiss-suggestion (&optional (stop-fetching t))
