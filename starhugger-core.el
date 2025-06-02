@@ -185,22 +185,6 @@ Else return as-is."
      (:else
       text))))
 
-(defvar starhugger-post-process-default-chain
-  `(
-    ;; Remove reasoning models's thinking tokens
-    ("\\(\n?\\|^\\)<think>[^z-a]*?</think>[ \t\n\r]*" "")
-    starhugger-post-process-instruct-markdown-code-block)
-  "List of post-processing steps for model responses.
-This is useful for instruction-tuned models, base models generally don't need
-post-processing.
-Each element can be:
-- A variadic function whose arguments are (generated-text &rest _) and returns
-  the processed text.
-- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.
-
-This list should be modified before creating config instances, if the
-config inherits it - the default unless specified otherwise.")
-
 (defvar starhugger-notify-request-error t
   "Whether to notify if an error was thrown when the request is completed.")
 
@@ -293,15 +277,16 @@ ERROR are passed to `request'."
     (_config
      &rest args &key prefix _suffix _context _filename &allow-other-keys))
 
-;; TODO: Like a hook, let t in 'post-process, 'system-prompts to present dynamic
-;; global value
-
 ;;;;;; Generic classes
 
 ;; Some slots have default values as [] (vector) to differentiate with nil
 
 (defclass starhugger-config ()
-  ((url :initarg :url :type string :documentation "API endpoint.")
+  ((model
+    :initarg :model
+    :type string
+    :documentation "Mandatory unique model name on the platform.")
+   (url :initarg :url :type string :documentation "API endpoint.")
    (api-key
     :initarg :api-key
     :initform nil
@@ -311,12 +296,9 @@ ERROR are passed to `request'."
     :initarg :parameters
     :initform '((stream . :false))
     :type list
-    :documentation "Additional request parameters.")
-   (model
-    :initarg :model
-    :type string
-    :documentation "Unique model name on the platform.
-This must be set!")
+    :documentation
+    "Additional request parameters.
+\"stream\" being false is just an example, it's always enforced when completing.")
    (num
     :initarg :num
     :initform 1
@@ -343,6 +325,7 @@ with the context string), the rest are ignored at the moment.")
     :initarg :system-prompts
     :initform []
     :type sequence
+    :reader starhugger-config.system-prompts
     :documentation "Sequence of system prompts.")
    (join-prompts
     :initarg :join-prompts
@@ -352,22 +335,24 @@ with the context string), the rest are ignored at the moment.")
     "For non-chat completions, join all non-suffix into a single prompt.
 Use when the provider doesn't support the \"prompt\" argument as an
 array.  If this is a non-nil string, join prompts into one using it as
-the separator.")
+the separator.  Like a hook, if an element is t instead of a string, it
+will the substituted by `starhugger-instruct-default-system-prompts'.")
    (prompt-params-fn
     :initarg :prompt-params-fn
     :initform #'starhugger-make-prompt-parameters-default
     :type function
-    :documentation
-    "Function to construct the system and/or user prompt array.")
+    :documentation "Function to construct the system and/or user prompt array.")
    (post-process
     :initarg :post-process
     :initform []
+    :reader starhugger-config.post-process
     :documentation
     "List of post-processing steps for model responses.
 Each element can be:
 - A variadic function whose arguments are (generated-text &rest _) and returns
   the processed text.
-- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments."))
+- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.
+- t : substitute with `starhugger-post-process-default-chain'."))
   :abstract t)
 ;; Constructor
 (cl-defmethod initialize-instance :after
@@ -382,28 +367,53 @@ Each element can be:
 The input format uses <FILL> to mark where content should be inserted.
 
 Requirements:
-- Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments
-- Do NOT include markdown formatting, code blocks, or any other wrappers
-- The provided markdown markers are just for clarify, do NOT include them in your answer
-- Include comments in the respective programming language's syntax when needed
-- Do NOT repeat any surrounding text, nor make any changes to them
-- If you want to add remarks about fixes or improvements, write them as syntactic comments inside <FILL> instead of modifying
-- Ensure proper indentation and formatting of the surrounding code
-- The fill may not always be composed of multiple lines, it may be just a part of a line
-- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it")
-  "Default system prompts for instruct-tuned models.
-This list should be modified before creating config instances, if the
-config inherits it - the default unless specified otherwise.")
+- Provide ONLY the replacement text/code for the <FILL> placeholder without any natural language explanations that aren't syntactic comments.
+- Do NOT include markdown formatting, code blocks, or any other wrappers.
+- The provided markdown markers are just for clarify, do NOT include them in your answer.
+- Include comments in the respective programming language's syntax when needed.
+- Do NOT repeat any surrounding text, nor make any changes to them.
+- If you want to add remarks about fixes or improvements, write them as syntactic comments inside <FILL> instead of modifying.
+- Ensure proper indentation and formatting of the surrounding code.
+- The fill may not always be composed of multiple lines, it may be just a part of a line.
+- If the fill is part of an uncompleted function, just try to fill within that function without extending to writing another function outside of it.
+")
+  "Default system prompts for instruct-tuned models.")
 
-(defclass starhugger-config-instruct-type-model (starhugger-config) () :abstract t)
+(defvar starhugger-post-process-default-chain
+  `(
+    ;; Remove reasoning models's thinking tokens
+    ("\\(\n?\\|^\\)<think>[^z-a]*?</think>[ \t\n\r]*" "")
+    starhugger-post-process-instruct-markdown-code-block)
+  "List of post-processing steps for model responses.
+This is useful for instruction-tuned models, base models generally don't need
+post-processing.
+Each element can be:
+- A variadic function whose arguments are (generated-text &rest _) and returns
+  the processed text.
+- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.")
+
+(defclass starhugger-config-instruct-type-model (starhugger-config)
+  ;; Cannot have a different :initarg from parent
+  ((post-process :initarg :post-process :initform '(t)))
+  (:default-initargs :post-process '(t))
+  :abstract t)
 (cl-defmethod initialize-instance :after
   ((instance starhugger-config-instruct-type-model) &rest _args)
-  (when (equal [] (slot-boundp instance 'system-prompts))
-    (setf (slot-value instance 'system-prompts)
-          starhugger-instruct-default-system-prompts))
+  (when (equal [] (slot-value instance 'system-prompts))
+    (setf (slot-value instance 'system-prompts) [t]))
   (when (equal [] (slot-value instance 'post-process))
-    (setf (slot-value instance 'post-process)
-          starhugger-post-process-default-chain)))
+    (setf (slot-value instance 'post-process) [t])))
+
+(cl-defmethod starhugger-config.system-prompts ((config starhugger-config))
+  (-splice-list
+   (lambda (it) (equal t it))
+   starhugger-instruct-default-system-prompts
+   (seq-into (slot-value config 'system-prompts) 'list)))
+(cl-defmethod starhugger-config.post-process ((config starhugger-config))
+  (-splice-list
+   (lambda (it) (equal t it))
+   starhugger-post-process-default-chain
+   (seq-into (slot-value config 'post-process) 'list)))
 
 (defclass starhugger-config-json-type-request (starhugger-config) () :abstract t)
 
@@ -519,7 +529,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
    _language
    _filename
    &allow-other-keys)
-  (-let* ((system-prompts (slot-value config 'system-prompts))
+  (-let* ((system-prompts (starhugger-config.system-prompts config))
           ((&alist
             'prefix formatted-prefix-with-context 'suffix formatted-suffix)
            (apply
@@ -546,7 +556,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
          '(
            ;; Carriage returns
            ("\r" ""))
-         (slot-value config 'post-process))))
+         (starhugger-config.post-process config))))
     (-let* ((op (starhugger--seq-first chain)))
       (cond
        ((seq-empty-p chain)
@@ -668,7 +678,7 @@ PREFIX, SUFFIX, CONTEXT, etc."))
                (string-replace "<FILL>" fill-placeholder-unique str))))
           (system-prompts
            (-map
-            uniquify-fill-placeholder-fn (slot-value config 'system-prompts)))
+            uniquify-fill-placeholder-fn (starhugger-config.system-prompts config)))
           ((&alist
             'prefix formatted-prefix-with-context 'suffix formatted-suffix)
            (apply
@@ -707,7 +717,7 @@ The replacement for %s is:"
                  (and (proper-list-p prompt) (not (seq-empty-p prompt))))
              `((messages .
                          [,@(--map `((role . "system") (content . ,it))
-                                   (slot-value config 'system-prompts))
+                                   (starhugger-config.system-prompts config))
                           ((role . "user") (content . ,prompt))])))
             (:else
              (apply (slot-value config 'prompt-params-fn) config args)))))
