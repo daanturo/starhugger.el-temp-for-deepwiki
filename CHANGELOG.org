@@ -1,19 +1,20 @@
 * Version 0.7.0
 
+- Revamp configurations, instead of many global variables, now a user can set many "provider" instances, each with their own sets of parameters for potentially different scenarios.
+
 - Add OpenAI-compatible API support and make it the default, the default URL is still Ollama's local server.
-  
+
 - Removals:
   - Hugging Face's old text inference backend and its accompanying options (https://github.com/daanturo/starhugger.el/issues/3).
   - Manual FIM prompt construction, just use the "suffix" parameter of APIs.
   - The unusable "grep-context".
   - Commands out the package's scope: ~starhugger-send~, ~starhugger-suggest-git-commit-message~.
-  - Option ~starhugger-fill-in-the-middle~, it's now always applied.
-  - Option ~starhugger-trim-spaces-around-prompt~, now always trim prefix's left newlines and suffix's right newlines, but not spaces.
+  - Many customizable options.  Temporarily ~starhugger-model-id~ is still obsoletely kept and is the default model name for provider configurations, if set already set by users to avoid too sudden breakages.
   - Option ~starhugger-trigger-suggestion-after-accepting~, continuously spitting out code without manual modifying is a bad idea.
-    
-- Add *instruction-tuned models* support.
 
-- More conservative defaults for ~starhugger-auto-idle-time~, ~starhugger-numbers-of-suggestions-to-fetch~.
+- Add instruction-tuned models support.
+
+- More conservative default(s) for: ~starhugger-auto-idle-time~ (0.5s to 1.0s).
 
 * Version 0.6.0
 

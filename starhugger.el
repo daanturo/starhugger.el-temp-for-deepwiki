@@ -327,7 +327,7 @@ will (re-)apply for all."
 (defvar starhugger-auto-config-instance
   (starhugger-config-openai-compat-base-completions
    :model
-   (or starhugger-model-id "qwen2.5-coder:4b-base")
+   (or starhugger-model-id "qwen2.5-coder:3b-base")
    :num 1
    :code-length 1024
    :join-prompts "\n"))

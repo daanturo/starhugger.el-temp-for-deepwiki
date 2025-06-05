@@ -358,7 +358,12 @@ with the context string), the rest are ignored at the moment.")
     :initarg :system-prompts
     :initform []
     :type sequence
-    :documentation "Sequence of system prompts.")
+    :documentation "Sequence of system prompts.
+Each element can be:
+- A string: a system prompt.
+- t : substitute with `starhugger-instruct-default-system-prompts'.
+
+By default for chat models, this  will be initialized to [t].")
    (other-prompts
     :initarg :other-prompts
     :initform []
@@ -389,11 +394,11 @@ Currently this is only used for instruction-tuned models.")
     :initform nil
     :type (or null string)
     :documentation
-    "For non-chat completions, join all non-suffix into a single prompt.
-Use when the provider doesn't support the \"prompt\" argument as an
-array.  If this is a non-nil string, join prompts into one using it as
-the separator.  Like a hook, if an element is t instead of a string, it
-will the substituted by `starhugger-instruct-default-system-prompts'.")
+    "For non-chat completions, join all non-suffix (prefix/prompt, system
+prompts, etc.) into a single prompt using this separator.  Use when the
+provider doesn't support the \"prompt\" argument as an array, such as
+Ollama.  By default without repo-wide context, this isn't so relevant
+since FIM models don't need system prompts nor instructions.")
    (prompt-params-fn
     :initarg :prompt-params-fn
     :initform #'starhugger-make-prompt-parameters-default
@@ -403,12 +408,16 @@ will the substituted by `starhugger-instruct-default-system-prompts'.")
     :initarg :post-process
     :initform []
     :documentation
-    "List of post-processing steps for model responses.
+    "Sequence of post-processing steps for model responses.
+This is useful for instruction-tuned models, base models generally don't need
+post-processing.
 Each element can be:
-- A variadic function whose arguments are (generated-text &rest _) and returns
-  the processed text.
+- A variadic function whose argument list is (generated-text &rest _) and
+  returns the processed text.
 - A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.
-- t : substitute with `starhugger-post-process-default-chain'."))
+- t : substitute with `starhugger-post-process-default-chain'.
+
+By default for chat models, this will be initialized to [t]."))
   :abstract t)
 ;; Constructor
 (cl-defmethod initialize-instance :after
@@ -442,12 +451,7 @@ The input format uses <FILL> to mark where content should be inserted."
     ("\\(\n?\\|^\\)<think>[^z-a]*?</think>[ \t\n\r]*" "")
     starhugger-post-process-instruct-markdown-code-block)
   "List of post-processing steps for model responses.
-This is useful for instruction-tuned models, base models generally don't need
-post-processing.
-Each element can be:
-- A variadic function whose arguments are (generated-text &rest _) and returns
-  the processed text.
-- A list of 2 strings: `replace-regexp-in-string''s first 2 arguments.")
+See symbol `starhugger-config''s post-process attribute.")
 
 (defclass starhugger-config-instruct-type-model (starhugger-config)
   ;; Cannot have a different :initarg from parent

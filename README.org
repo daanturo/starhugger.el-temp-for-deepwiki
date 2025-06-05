@@ -3,8 +3,6 @@
 
 - LLM/AI-powered text & code completion client for Emacs.
 
-Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]], [[https://github.com/ollama/ollama][Ollama]].
-
 - [[https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979][Demo]]:
 https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979
 
@@ -14,8 +12,7 @@ https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a81
 
 * Breaking change!
 
-- [[https://gitlab.com/daanturo/starhugger.el/-/tags/v0.7.0][Version 0.7.0]]: The old Hugging text inference backend was removed, including manual FIM prompt construction.
-Use an OpenAI-compatible API provider (the default for now) instead.
+- [[./CHANGELOG.org::*Version 0.7.0][Version 0.7.0]]: The old Hugging text inference backend and most global options were removed, including manual FIM prompt construction.  Use an OpenAI-compatible API provider instead.
 
 * Installation
 
@@ -44,22 +41,34 @@ Or any package manager of your choice.
 
 ** Basic setup
 
-By default, starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the base URL and the corresponding endpoint.
+There are 2 primary entrances:
+- ~M-x~ ~starhugger-trigger-suggestion~: on-demand command, configure with ~starhugger-interactive-config-instance~.
+- ~starhugger-auto-mode~: automatic code suggestion, configure with ~starhugger-auto-config-instance~.
 
-The "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/chat/completions~ doesn't.
+Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]], [[https://github.com/ollama/ollama/blob/main/docs/api.md][Ollama's API]].
+
+By default, Starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the configuration appropriately.
+
+Note that the "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/chat/completions~ doesn't.
 
 #+begin_src elisp
-;; Example: a Hugging Face Inference provider, note the "/completions" endpoint
-(setq starhugger-openai-compat-base-completions-url "https://router.huggingface.co/nebius/v1/completions")
+;; Example for the interactive command: a Hugging Face Inference provider, note the "/completions" endpoint for FIM models
+(setq starhugger-interactive-config-instance
+      (starhugger-config-openai-compat-base-completions
+       :url "https://router.huggingface.co/nebius/v1/completions"
+       ;; The language model's unique on the selected provider, this should be a
+       ;; base (not chat) model that was trained with FIM
+       :model "Qwen/Qwen2.5-Coder-7B-fast"
+       :api-key "Your API key or access token."
+       :code-length 8192))
 
-(setq starhugger-openai-compat-api-key "Your API key or access token.")
-
-;; The current default, use it for FIM models
-(setq starhugger-completion-backend-function #'starhugger-openai-compat-api-base-completions)
-
-;; The language model's unique on the selected provider, remember this should be
-;; a base (not chat) model that was trained with FIM
-(setq starhugger-model-id "Qwen/Qwen2.5-Coder-7B-fast")
+;; Example for auto mode: use a lighter local provider
+(setq starhugger-auto-config-instance
+      (starhugger-config-openai-compat-base-completions
+       ;; Ollama's OpenAI-compatible server
+       :url "http://localhost:11434/v1/completions"
+       :model "qwen2.5-coder:3b-base"
+       :code-length 1024))
 
 ;;;; Key bindings
 
@@ -78,34 +87,40 @@ The "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/cha
 
 Use ~starhugger-dismiss-suggestion~ (bound to =C-g= by default when showing suggestion) to cancel.
 
-There is also a buffer-local minor ~starhugger-auto-mode~, but be careful when using it for non-local providers because of their limit rates and/or charging fees.  Consider raising ~starhugger-auto-idle-time~ up.
+For ~starhugger-auto-mode~, be careful when using it for non-local providers because of their limit rates and/or charging fees.  Consider raising ~starhugger-auto-idle-time~ up.
 
 
 *Use instruction-tuned models*
 
-There are only so few FIM-trained models, the majority of released LLMs are instruction-tuned, starhugger also tries to support the latter type of models via prompting and post-processing.  
+There are only so few FIM-trained models and the majority of released LLMs are instruction-tuned, Starhugger also tries to support the latter type of models via prompting and post-processing.  
 
 #+begin_src elisp
-(setq starhugger-completion-backend-function #'starhugger-openai-compat-api-chat-completions)
-
-;; Current default: Ollama's OpenAI-Compatible API, set appropriately for the provider
-(setq starhugger-openai-compat-chat-completions-url "http://localhost:11434/v1/chat/completions")
-
-;; Any instruction-tuned model
-(setq starhugger-model-id "gemma3:12b")
+(setq starhugger-interactive-config-instance
+      (starhugger-config-openai-compat-chat-completions
+       :url "http://localhost:11434/v1/chat/completions"
+       ;; Any instruction-tuned model
+       :model "gemma3:12b"
+       ;; Optional: use a custom function other than this to instruct the chat model
+       :prompt-params-fn #'starhugger-make-prompt-parameters-default))
 #+end_src
 
-To use different system and/or user prompts, customize ~starhugger-instruct-make-prompt-messages-function~.
+The default prompting and post-processing may not be perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.
 
-This prompt is not perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.  The post-processing steps (~starhugger-post-process-default-chain~) use some heuristics to extract "just" code from the response.
+To configure, customize any of:
 
-Beware that reasoning models produce lots of tokens for thinking and take significantly more inference time, you may want to apply some of those settings, depending on the use case and model:
-
+- ~starhugger-instruct-default-system-prompts~: sequence of system prompts, this is used globally by default.
+- The config instance's ~:system-prompts~: similar to the above but specific to the config instance, (like a [[https://www.gnu.org/software/emacs/manual/html_node/emacs/Hooks.html][hook]]) a value of ~t~ will be replaced with ~starhugger-instruct-default-system-prompts~ (spliced).
 #+begin_src elisp
-(setq starhugger-openai-compat-chat-completions-parameter-alist '((reasoning_effort . "low")))
-
-(add-to-list 'starhugger-instruct-default-system-prompts "/no_think")
+(setq starhugger-interactive-config-instance
+      (starhugger-config-openai-compat-chat-completions
+       :url "http://localhost:11434/v1/chat/completions"
+       :model "qwen3"
+       ;; Example of system prompt: use `starhugger-instruct-default-system-prompts' and softly switch off thinking mode
+       :system-prompts '(t "/no_think")
+       :parameters '((reasoning_effort . "low"))))
 #+end_src
+- The config instance's ~:prompt-params-fn~: function to construct parameters in Lisp data, especially the "messages" parameter for OpenAI-compatible APIs.  This is the most flexible way for custom prompting.  Refer to ~starhugger-make-prompt-parameters-default~'s implementation for ~starhugger-config-instruct-type-model~ for the expected arguments and return value.
+- The config instance's ~:post-process~: a value of ~t~ will be replaced with ~starhugger-post-process-default-chain~.
 
 ** Optional settings
 
@@ -178,3 +193,5 @@ Emacs overlays are used under the hood to display inline suggestion, there are s
 - [-] With [[https://github.com/milanglacier/minuet-ai.el][prompt engineering]], allow making use of conversational models, not just limited to FIM-supported coding ones.
 
 - [ ] Use different backends and/or presets for different commands, for example: auto mode uses a lighter model than the explicit ~starhugger-trigger-suggestion~.
+
+- [ ] Streaming mode.
