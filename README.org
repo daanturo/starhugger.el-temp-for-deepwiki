@@ -12,7 +12,7 @@ https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a81
 
 * Breaking change!
 
-- [[./CHANGELOG.org::*Version 0.7.0][Version 0.7.0]]: The old Hugging text inference backend and most global options were removed, including manual FIM prompt construction.  Use an OpenAI-compatible API provider instead.
+- [[./CHANGELOG.org::*Version 0.7.0][Version 0.7.0]]: The old Hugging text inference backend and most global options were removed, including manual FIM prompt construction.  Use an OpenAI-compatible API provider with attached options instead.
 
 * Installation
 
@@ -42,10 +42,10 @@ Or any package manager of your choice.
 ** Basic setup
 
 There are 2 primary entrances:
-- ~M-x~ ~starhugger-trigger-suggestion~: on-demand command, configure with ~starhugger-interactive-config-instance~.
-- ~starhugger-auto-mode~: automatic code suggestion, configure with ~starhugger-auto-config-instance~.
+- ~M-x~ ~starhugger-trigger-suggestion~: on-demand command, configured with ~starhugger-interactive-config-instance~.
+- ~starhugger-auto-mode~: automatic code suggestion, configured with ~starhugger-auto-config-instance~.
 
-Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]], [[https://github.com/ollama/ollama/blob/main/docs/api.md][Ollama's API]].
+Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]] (preferred) and [[https://github.com/ollama/ollama/blob/main/docs/api.md][Ollama's API]].
 
 By default, Starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the configuration appropriately.
 

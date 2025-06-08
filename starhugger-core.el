@@ -8,11 +8,12 @@
 ;;; Code:
 
 (require 'cl-macs)
+(require 'eieio)
 
 (require 'compat)
 (require 'dash)
 
-(require 'request)
+(require 'plz)
 
 (declare-function project-root "project")
 (declare-function json-pretty-print-buffer "json")
@@ -189,14 +190,6 @@ Else return as-is."
   (dlet ((starhugger-notify-request-error nil))
     (apply func args)))
 
-(defun starhugger--request-el--silent-sentinel-a (fn proc event &rest args)
-  (cond
-   ((member event '("interrupt" "interrupt\n"))
-    (dlet ((request-message-level -1))
-      (apply fn proc event args)))
-   (:else
-    (apply fn proc event args))))
-
 (defvar starhugger--running-request-table--table
   (make-hash-table :test #'equal))
 (defun starhugger--running-request-table ()
@@ -229,25 +222,12 @@ the corresponding buffer key so that starhugger can terminate them."
           (delete obj-or-id obj-list))))
       (gethash buf (starhugger--running-request-table) '())))
 
-(cl-defun starhugger--request-el-request (url &rest settings &key error &allow-other-keys)
-  "Wrapper around (`request' URL @SETTINGS).
-ERROR are passed to `request'."
-  (declare (indent defun))
-  (run-hooks 'starhugger-before-request-hook)
-  (-let*
-      ((req-response
-        (apply #'request url :error (or error #'ignore) settings))
-       ;;  Silence errors when aborting, see
-       ;;  https://github.com/tkf/emacs-request/issues/226.
-       (_
-        (add-function :around
-                      (process-sentinel
-                       (get-buffer-process
-                        (request-response--buffer req-response)))
-                      #'starhugger--request-el--silent-sentinel-a))
-       (retval
-        req-response))
-    retval))
+(defun starhugger--plz-cancellable-queue (method url &rest plz-args)
+  "Make a request with METHOD and PLZ-ARGS to URL.
+Since `plz' doesn't have a direct cancel function, return a `plz-queue'
+structure to be cancelled via `plz-clear'."
+  (-let* ((queue (make-plz-queue)))
+    (plz-run (apply #'plz-queue queue method url plz-args))))
 
 (defun starhugger--cancel-request (obj)
   (-let* (((&plist :cancel-fn cancel-fn :process process) obj))
@@ -358,7 +338,8 @@ with the context string), the rest are ignored at the moment.")
     :initarg :system-prompts
     :initform []
     :type sequence
-    :documentation "Sequence of system prompts.
+    :documentation
+    "Sequence of system prompts.
 Each element can be:
 - A string: a system prompt.
 - t : substitute with `starhugger-instruct-default-system-prompts'.
@@ -457,8 +438,7 @@ See symbol `starhugger-config''s post-process attribute.")
   ;; Cannot have a different :initarg from parent
   ((post-process :initarg :post-process :initform '(t))
    (role-system
-    :initarg
-    :role-system
+    :initarg :role-system
     :initform "system"
     :documentation
     "For instruction-tuned models's \"message\" parameter's system prompts,
@@ -551,7 +531,9 @@ PREFIX, SUFFIX, CONTEXT, etc."))
    args
    &key
    caller
+   stream-callback
    &allow-other-keys)
+  (run-hooks 'starhugger-before-request-hook)
   (let* ((time-beg (current-time))
          (url (slot-value config 'url))
          (api-key (slot-value config 'api-key))
@@ -561,37 +543,38 @@ PREFIX, SUFFIX, CONTEXT, etc."))
          (data-in-lisp
           (apply #'starhugger--request-make-input-data config args))
          (data-in-str (starhugger--json-serialize data-in-lisp))
-         (_ (starhugger--log-request-data url data-in-lisp time-beg)))
-    (letrec ((request-obj
-              (starhugger--request-el-request
-                url
-                :type "POST"
-                :headers headers
-                :parser (lambda () (json-parse-buffer :object-type 'alist))
-                :data data-in-str
-                :complete
-                (starhugger--lambda (&rest result &key data error-thrown &allow-other-keys)
-                  (-let* ((time-end (current-time))
-                          (data-out-lisp data)
-                          (content-choices
-                           (if error-thrown
-                               '()
-                             (starhugger--choices-from-response-data
-                              config data-out-lisp))))
-                    (unwind-protect
-                        (funcall callback
-                                 content-choices
-                                 :error
-                                 (and error-thrown
-                                      `((error-thrown ,error-thrown)
-                                        (data-out-lisp ,data-out-lisp))))
-                      (starhugger--log-request-data url data-out-lisp time-beg
-                                                    time-end)))))))
+         (_ (starhugger--log-request-data url data-in-lisp time-beg))
+         (complete-fn
+          (lambda (data-alist &optional error-thrown &rest _)
+            (-let* ((time-end (current-time))
+                    (content-choices
+                     (if error-thrown
+                         '()
+                       (starhugger--choices-from-response-data
+                        config data-alist))))
+              (unwind-protect
+                  (funcall callback
+                           content-choices
+                           :error
+                           (and error-thrown
+                                `((error-thrown ,error-thrown)
+                                  (data ,data-alist))))
+                (starhugger--log-request-data url data-alist time-beg
+                                              time-end))))))
+    (letrec ((plz-request-queue
+              (starhugger--plz-cancellable-queue
+               'post url
+               :headers headers
+               :as #'starhugger--json-parse-buffer
+               :body data-in-str
+               :then
+               (lambda (data-alist &rest _) (funcall complete-fn data-alist))
+               :else
+               (lambda (err &rest _) (funcall complete-fn '() err)))))
       (-let* ()
         (list
-         :cancel-fn (lambda () (request-abort request-obj))
-         :process (get-buffer-process (request-response--buffer request-obj))
-         :object request-obj
+         :cancel-fn (lambda () (plz-clear plz-request-queue))
+         :object plz-request-queue
          :caller caller)))))
 
 (cl-defmethod starhugger--prompt-components-from-buffer

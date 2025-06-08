@@ -1,7 +1,7 @@
 ;;; starhugger.el --- LLM/AI-powered text & code completion client  -*- lexical-binding: t; -*-
 
 ;; Version: 0.7.0-git
-;; Package-Requires: ((emacs "28.2") (compat "29.1.4.0") (dash "2.18.0") (s "1.13.1") (spinner "1.7.4") (request "0.3.2"))
+;; Package-Requires: ((emacs "28.2") (compat "29.1.4.0") (dash "2.18.0") (s "1.13.1") (spinner "1.7.4") (plz "0.9.1))
 ;; Keywords: completion, convenience, languages
 ;; Homepage: https://gitlab.com/daanturo/starhugger.el
 
@@ -32,7 +32,6 @@
 (require 'compat)
 (require 'dash)
 (require 's)
-(require 'request)
 
 (require 'starhugger-core)
 
