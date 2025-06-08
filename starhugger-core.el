@@ -37,9 +37,9 @@ Additionally prevent errors about multi-byte characters."
   (-->
    object (apply #'json-serialize it args) (encode-coding-string it 'utf-8)))
 
-(defun starhugger--json-parse-buffer ()
+(defun starhugger--json-parse-buffer (&rest args)
   "`json-parse-buffer', prefer alist."
-  (json-parse-buffer :object-type 'alist))
+  (apply #'json-parse-buffer :object-type 'alist args))
 
 (defun starhugger--json-pretty-string (str)
   "Return JSON string STR prettified (formatted).
@@ -385,6 +385,11 @@ since FIM models don't need system prompts nor instructions.")
     :initform #'starhugger-make-prompt-parameters-default
     :type function
     :documentation "Function to construct the system and/or user prompt array.")
+   (stream
+    :initarg :stream
+    :initform nil
+    :type boolean
+    :documentation "Enable streaming (and limits n to 1).")
    (post-process
     :initarg :post-process
     :initform []
@@ -487,10 +492,6 @@ with many more functions.")
 If the PROMPT argument is non-nil, prefer it over constructing from
 PREFIX, SUFFIX, CONTEXT, etc."))
 
-(cl-defgeneric starhugger--perform-request
-    (config
-     callback &rest args &key prefix suffix context num &allow-other-keys))
-
 (cl-defgeneric starhugger--prompt-components-from-buffer
     (_config
      callback
@@ -522,7 +523,61 @@ PREFIX, SUFFIX, CONTEXT, etc."))
      (:else
       (apply context-callback nil plist)))))
 
+(cl-defgeneric starhugger--perform-request
+    (config
+     callback &rest args &key prefix suffix context num &allow-other-keys))
+
+(defvar-local starhugger--stream-buffer-header-end-position nil)
+(defvar-local starhugger--stream-buffer-current-point nil)
+(defvar-local starhugger--stream-buffer-accumulated-choices nil)
+
+(cl-defgeneric starhugger--stream-parse-chunk-to-content-choices (config &rest _))
+
+(cl-defun starhugger--stream-make-filter (config stream-callback &rest _ &key &allow-other-keys)
+  (lambda (process chunk)
+    (with-current-buffer (process-buffer process)
+      (save-excursion (internal-default-process-filter process chunk))
+      (when (and (null starhugger--stream-buffer-header-end-position)
+                 (re-search-forward plz-http-end-of-headers-regexp))
+        (setq starhugger--stream-buffer-header-end-position (point)))
+      (if starhugger--stream-buffer-current-point
+          (goto-char starhugger--stream-buffer-current-point)
+        (setq starhugger--stream-buffer-current-point
+              starhugger--stream-buffer-header-end-position))
+      (-let* ((parse-success t))
+        (while parse-success
+          (condition-case _
+              (-let* (((&alist 'choices choices 'done done)
+                       (starhugger--stream-parse-chunk-to-content-choices
+                        config)))
+                (when (equal nil starhugger--stream-buffer-accumulated-choices)
+                  (setq starhugger--stream-buffer-accumulated-choices
+                        (-repeat (length choices) nil)))
+                (setq starhugger--stream-buffer-accumulated-choices
+                      (-map
+                       (-lambda ((accu new)) (concat accu new))
+                       (-zip-lists
+                        starhugger--stream-buffer-accumulated-choices choices))))
+            ((error json-parse-error) (setq parse-success nil))))
+        (setq starhugger--stream-buffer-current-point (point)))
+      (funcall stream-callback starhugger--stream-buffer-accumulated-choices))))
+
 ;;;;;;; Default methods
+
+(cl-defun starhugger--stream-chunk-to-content-choices--parse-data:-json ()
+  "Parse this format into Lisp object: \"data: {...\".
+Or the JSON object at line start."
+  (re-search-forward
+   (concat
+    "^\\(?:[[:alnum:]_-]+[ \t]*:[ \t]*\\)?"
+    "\\({.*\\|\\[[ \t]*DONE[ \t]*\\]\\)"))
+  (cond
+   ((string-match "^[ \t]*\\[[ \t]*DONE[ \t]*\\][ \t]*$" (match-string 1))
+    `((done . t)))
+   (:else
+    (goto-char (match-beginning 1))
+    (starhugger--json-parse-buffer))))
+
 
 (cl-defmethod starhugger--perform-request
   ((config starhugger-config-json-type-request)
@@ -544,6 +599,9 @@ PREFIX, SUFFIX, CONTEXT, etc."))
           (apply #'starhugger--request-make-input-data config args))
          (data-in-str (starhugger--json-serialize data-in-lisp))
          (_ (starhugger--log-request-data url data-in-lisp time-beg))
+         (stream-flag (starhugger-get config 'stream))
+         ;; (stream-choices '())
+         (filter-fn (lambda (proc chunk)))
          (complete-fn
           (lambda (data-alist &optional error-thrown &rest _)
             (-let* ((time-end (current-time))
@@ -562,15 +620,17 @@ PREFIX, SUFFIX, CONTEXT, etc."))
                 (starhugger--log-request-data url data-alist time-beg
                                               time-end))))))
     (letrec ((plz-request-queue
-              (starhugger--plz-cancellable-queue
-               'post url
-               :headers headers
-               :as #'starhugger--json-parse-buffer
-               :body data-in-str
-               :then
-               (lambda (data-alist &rest _) (funcall complete-fn data-alist))
-               :else
-               (lambda (err &rest _) (funcall complete-fn '() err)))))
+              (apply #'starhugger--plz-cancellable-queue
+                     'post
+                     url
+                     :headers headers
+                     :as #'starhugger--json-parse-buffer
+                     :body data-in-str
+                     :then
+                     (lambda (data-alist &rest _)
+                       (funcall complete-fn data-alist))
+                     :else
+                     (lambda (err &rest _) (funcall complete-fn '() err)))))
       (-let* ()
         (list
          :cancel-fn (lambda () (plz-clear plz-request-queue))
@@ -701,6 +761,12 @@ PREFIX, SUFFIX, CONTEXT, etc."))
 (cl-defmethod starhugger--choices-from-response-data ((_config starhugger-config-ollama-api-generate) data)
   (-some--> data (list (alist-get 'response it))))
 
+(cl-defmethod starhugger--stream-parse-chunk-to-content-choices
+  ((_config starhugger-config-ollama-api-generate) &rest _)
+  (-let* ((obj (starhugger--stream-chunk-to-content-choices--parse-data:-json)))
+    `((choices . [,(map-nested-elt obj '(response))])
+      (done . ,(member (map-nested-elt obj '(done)) '(t))))))
+
 ;;;;;; OpenAI-compatible API
 
 (defclass starhugger-config-openai-compat (starhugger-config-json-type-request) () :abstract t)
@@ -738,6 +804,19 @@ PREFIX, SUFFIX, CONTEXT, etc."))
       data
     (alist-get 'choices it)
     (seq-map (lambda (choice) (alist-get 'text choice)) it)))
+
+(cl-defmethod starhugger--stream-parse-chunk-to-content-choices
+  ((_config starhugger-config-ollama-api-generate) &rest _)
+  (-let* ((obj (starhugger--stream-chunk-to-content-choices--parse-data:-json))
+          (choices
+           (-->
+            obj (map-nested-elt it '(choices))
+            (cl-sort
+             it #'<
+             :key
+             (lambda (elem) (map-nested-elt elem 'index))))))
+    `((choices . [,(map-nested-elt obj '(response))])
+      (done . ,(member (map-nested-elt obj '(done)) '(t))))))
 
 ;;;;;;; OpenAI-compatible chat completions (instruct)
 
