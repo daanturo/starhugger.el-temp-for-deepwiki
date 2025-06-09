@@ -115,8 +115,9 @@ Recent suggestions are added to the beginning.")
     (starhugger-dismiss-suggestion nil)))
 
 (define-minor-mode starhugger-inlining-mode
-  "Not meant to be called normally.
-When this minor mode is off, the overlay must not be shown."
+  "Enable the inlining suggestion overlay to be shown.
+This minor mode is not meant to be called normally.  When it is off, the
+overlay must be disabled."
   :global nil
   :lighter " 🌠"
   :keymap `( ;
@@ -139,13 +140,14 @@ When this minor mode is off, the overlay must not be shown."
       (starhugger-inlining-mode))))
 
 (defun starhugger--current-overlay-suggestion ()
-  (overlay-get starhugger--overlay 'starhugger-ovlp-current-suggestion))
+  (and (overlayp starhugger--overlay)
+       (overlay-get starhugger--overlay 'starhugger-ovlp-current-suggestion)))
 
-(defun starhugger--update-overlay (suggt &optional orig-pt)
+(cl-defun starhugger--update-overlay (suggt &optional orig-pt &key stream)
   "Update overlay to display SUGGT after ORIG-PT.
 ORIG-PT defaults to current point, when supplying it with a
-non-nil (numeric) value, mark SUGGT and ORIG-PT as the original
-ones."
+non-nil (numeric) value, mark SUGGT and ORIG-PT as the original ones.
+STREAM: the (incomplete) SUGGT is being streamed."
   (-let* ((beg-pt (or orig-pt (point)))
           (suggt*
            (-->
@@ -154,13 +156,15 @@ ones."
                         ;; allow placing the cursor before the overlay when
                         ;; 'after-string
                         'cursor t)
-            ;; WORKAROUND: when the suggestions begins with a newline, the point
+            ;; WORKAROUND: when the suggestion begins with a newline, the point
             ;; will be placed at the start of the first non-newline character,
             ;; therefore won't stay at the current position visually, workaround
             ;; this by prefixing with a space
             (if (and (< 0 (length suggt)) (= ?\n (aref suggt 0)))
                 (concat " " it)
               it))))
+    ;; "ovlp": overlay property
+    (overlay-put starhugger--overlay 'starhugger-ovlp-stream stream)
     (overlay-put starhugger--overlay 'starhugger-ovlp-current-suggestion suggt)
     (when orig-pt
       (overlay-put
@@ -191,8 +195,11 @@ ones."
 (defun starhugger--active-overlay-p ()
   (and starhugger--overlay (overlay-buffer starhugger--overlay)))
 
-(defun starhugger--init-overlay (suggt pt)
-  "Initialize over to show SUGGT and mark PT as the original position."
+(cl-defun starhugger--init-overlay (suggt pt &key stream)
+  "Initialize over to show SUGGT and mark PT as the original position.
+PROPERTIES: additional properties to put on the overlay, as a (2D) list
+of \\='(prop value) lists.  STREAM: the (incomplete) SUGGT is being
+streamed."
   (when (starhugger--active-overlay-p)
     (delete-overlay starhugger--overlay))
   (when (<= pt (point-max))
@@ -203,7 +210,7 @@ ones."
                         t t))
     ;; (overlay-put starhugger--overlay 'keymap starhugger-at-suggestion-map)
     (overlay-put starhugger--overlay 'priority 1)
-    (starhugger--update-overlay suggt pt)))
+    (starhugger--update-overlay suggt pt :stream stream)))
 
 (defun starhugger-at-suggestion-beg-p (&optional cmd)
   "Return CMD (or true) when point is at suggestion start.
@@ -311,7 +318,7 @@ will (re-)apply for all."
                  (line-number-at-pos)
                  (current-column)
                  recent-suggt))
-      (starhugger--init-overlay recent-suggt pt))
+      (starhugger--init-overlay recent-suggt pt :stream nil))
     recent-suggt))
 
 ;; Temporarily depend on `starhugger-model-id' to not break configurations so
@@ -358,41 +365,51 @@ to multiple fetches."
            (or (and interact
                     starhugger-enable-spinner
                     (starhugger--spinner-start))
-               #'ignore)))
+               #'ignore))
+          (callback
+           (starhugger--lambda (content-choices
+                                accumulated-num
+                                &rest
+                                query-until-number-result
+                                &key
+                                error
+                                &allow-other-keys)
+             (when callback
+               (apply callback content-choices query-until-number-result))
+             (cond
+              ((not (buffer-live-p orig-buf)))
+              (:else
+               (with-current-buffer orig-buf
+                 (-when-let*
+                     ((_ (< 0 (length content-choices)))
+                      (1st-choice (starhugger--seq-first content-choices))
+                      ;; Only display and continue when didn't move or
+                      ;; interactive, in that case we are explicitly waiting
+                      (_ (or interact (= orig-pt (point)))))
+                   (starhugger--ensure-inlininng-mode)
+                   (starhugger--add-to-suggestion-list content-choices state)
+                   ;; Initial request
+                   (when (= accumulated-num (length content-choices))
+                     (starhugger--init-overlay 1st-choice orig-pt :stream nil)))
+                 (when (or error (<= target-num accumulated-num))
+                   (funcall stop-spin))
+                 (when (not (starhugger--active-overlay-p))
+                   (starhugger--ensure-inlininng-mode 0))))))))
     (starhugger--query-until-number
-     config target-num
-     (starhugger--lambda (content-choices
-                          accumulated-num
-                          &rest
-                          query-until-number-result
-                          &key
-                          error
-                          &allow-other-keys)
-       (when callback
-         (apply callback content-choices query-until-number-result))
-       (cond
-        ((not (buffer-live-p orig-buf)))
-        (:else
+     config target-num callback
+     :stream-callback
+     (starhugger--lambda (stream-accumulation &rest stream-res-args &key done &allow-other-keys)
+       (when stream-accumulation
          (with-current-buffer orig-buf
-           (-when-let* ((_ (< 0 (length content-choices)))
-                        (1st-choice (starhugger--seq-first content-choices))
-                        ;; Only display and continue when didn't move or
-                        ;; interactive, in that case we are explicitly waiting
-                        (_ (or interact (= orig-pt (point)))))
-             (starhugger--ensure-inlininng-mode)
-             (starhugger--add-to-suggestion-list content-choices state)
-             ;; Initial request
-             (when (= accumulated-num (length content-choices))
-               (starhugger--init-overlay 1st-choice orig-pt)))
-           (when (or error (<= target-num accumulated-num))
-             (funcall stop-spin))
-           (when (not (starhugger--active-overlay-p))
-             (starhugger--ensure-inlininng-mode 0))))))
-     :query-kwargs
-     (list
-      :caller #'starhugger-trigger-suggestion
-      :buffer orig-buf
-      :prompt 'buffer))))
+           (starhugger--ensure-inlininng-mode)
+           ;; Don't override a complete suggestion, and mark even the "done"
+           ;; content as streaming because it's not post-processed
+           (when (or (zerop (length (starhugger--current-overlay-suggestion)))
+                     (overlay-get starhugger--overlay 'starhugger-ovlp-stream))
+             (starhugger--init-overlay stream-accumulation orig-pt :stream t)))))
+     :caller #'starhugger-trigger-suggestion
+     :buffer orig-buf
+     :prompt 'buffer)))
 
 (defun starhugger--triggger-suggestion-prefer-cache
     (in-buffer position &optional cache-only callback)
@@ -467,10 +484,13 @@ To prevent key binding conflicts such as TAB."
 
 (defun starhugger--accept-suggestion-partially (by &optional args)
   "Insert a part of active suggestion by the function BY.
-Accept the part that is before the point after applying BY on
-ARGS. Note that BY should be `major-mode' independent (being
-executed in a temporary buffer)."
-  (-when-let* ((pos (overlay-start starhugger--overlay)))
+Accept the part that is before the point after applying BY on ARGS. Note
+that BY should be `major-mode' independent (being executed in a
+temporary buffer).  Do nothing if the suggestion is being streamed."
+  (-when-let* ((pos (overlay-start starhugger--overlay))
+               (_
+                (not
+                 (overlay-get starhugger--overlay 'starhugger-ovlp-stream))))
     (dlet ((starhugger--inline-inhibit-changing-overlay t))
       (goto-char pos)
       (-let* ((suggestion (starhugger--current-overlay-suggestion))
@@ -547,11 +567,12 @@ executed in a temporary buffer)."
   "Show the previous suggestion.
 With prefix argument DELTA, show the suggestion that is DELTA away."
   (interactive "p")
-  (-let* ((pt (overlay-get starhugger--overlay 'starhugger-ovlp-original-position))
+  (-let* ((pt
+           (overlay-get starhugger--overlay 'starhugger-ovlp-original-position))
           (suggestions (starhugger--relevant-fetched-suggestions nil pt))
           (prev-idx (starhugger--get-prev-suggestion-index delta suggestions))
           (suggt (elt suggestions prev-idx)))
-    (starhugger--update-overlay suggt pt)))
+    (starhugger--update-overlay suggt pt :stream nil)))
 
 (defun starhugger-show-next-suggestion (delta)
   "Show the next suggestion.
