@@ -1,7 +1,7 @@
 ;;; starhugger.el --- LLM/AI-powered text & code completion client  -*- lexical-binding: t; -*-
 
 ;; Version: 0.7.0-git
-;; Package-Requires: ((emacs "28.2") (compat "29.1.4.0") (dash "2.18.0") (s "1.13.1") (spinner "1.7.4") (plz "0.9.1))
+;; Package-Requires: ((emacs "28.2") (compat "29.1.4.0") (dash "2.18.0") (s "1.13.1") (spinner "1.7.4") (plz "0.9.1"))
 ;; Keywords: completion, convenience, languages
 ;; Homepage: https://gitlab.com/daanturo/starhugger.el
 
@@ -94,7 +94,8 @@ For `starhugger-auto-mode'."
 (defun starhugger--spinner-start ()
   (unless starhugger--spinner-added-type
     (require 'spinner)
-    (push '(starhugger . ["⭐" "🌟"]) spinner-types)
+    ;; ["⭐" "🌟"]
+    (push '(starhugger . ["⯪" "⯫"]) spinner-types)
     (setq starhugger--spinner-added-type t))
   (spinner-start 'starhugger 3))
 
@@ -119,7 +120,7 @@ Recent suggestions are added to the beginning.")
 This minor mode is not meant to be called normally.  When it is off, the
 overlay must be disabled."
   :global nil
-  :lighter " 🌠"
+  :lighter " Inline☆"
   :keymap `( ;
             (,(kbd "<remap> <keyboard-quit>") . starhugger-dismiss-suggestion)
             ;;
@@ -329,14 +330,16 @@ will (re-)apply for all."
    (or starhugger-model-id "gemma3:12b")
    :code-length 8192
    :num 3
-   :join-prompts "\n"))
+   :join-prompts "\n")
+  "Configure interactive calls of `starhugger-trigger-suggestion'.")
 (defvar starhugger-auto-config-instance
   (starhugger-config-openai-compat-base-completions
    :model
    (or starhugger-model-id "qwen2.5-coder:3b-base")
    :num 1
    :code-length 1024
-   :join-prompts "\n"))
+   :join-prompts "\n")
+  "Configure `starhugger-auto-mode'.")
 
 ;;;###autoload
 (cl-defun starhugger-trigger-suggestion (&key interact callback config &allow-other-keys)
@@ -399,7 +402,7 @@ to multiple fetches."
      config target-num callback
      :stream-callback
      (starhugger--lambda (stream-accumulation &rest stream-res-args &key done &allow-other-keys)
-       (when stream-accumulation
+       (when (and stream-accumulation (buffer-live-p orig-buf))
          (with-current-buffer orig-buf
            (starhugger--ensure-inlininng-mode)
            ;; Don't override a complete suggestion, and mark even the "done"
@@ -660,7 +663,7 @@ Note that the number of suggestions are limited by
 ;;;###autoload
 (define-minor-mode starhugger-auto-mode
   "Automatic `starhugger-trigger-suggestion' in current buffer."
-  :lighter " 💫"
+  :lighter " Auto☆"
   :global nil
   (if starhugger-auto-mode
       (progn

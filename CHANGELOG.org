@@ -16,6 +16,8 @@
 
 - More conservative default(s) for: ~starhugger-auto-idle-time~ (0.5s to 1.0s).
 
+- Change mode lighters: " 🌠" -> " Inline☆", " 💫" -> " Auto☆", spinner "⭐🌟" -> "⯪⯫".
+
 * Version 0.6.0
 
 - Use Ollama's ~suffix~ parameter (https://gitlab.com/daanturo/starhugger.el/-/merge_requests/3).

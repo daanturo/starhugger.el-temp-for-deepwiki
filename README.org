@@ -119,7 +119,7 @@ To configure, customize any of:
        :system-prompts '(t "/no_think")
        :parameters '((reasoning_effort . "low"))))
 #+end_src
-- The config instance's ~:prompt-params-fn~: function to construct parameters in Lisp data, especially the "messages" parameter for OpenAI-compatible APIs.  This is the most flexible way for custom prompting.  Refer to ~starhugger-make-prompt-parameters-default~'s implementation for ~starhugger-config-instruct-type-model~ for the expected arguments and return value.
+- The config instance's ~:prompt-params-fn~: function to construct parameters in Lisp data, especially the "messages" parameter for OpenAI-compatible APIs.  This is the most flexible way for custom prompting.  Refer to ~starhugger-make-prompt-parameters-default~'s ~starhugger-config-instruct-type-model~ implementation for the expected arguments and return value.
 - The config instance's ~:post-process~: a value of ~t~ will be replaced with ~starhugger-post-process-default-chain~.
 
 ** Optional settings
@@ -188,10 +188,7 @@ Emacs overlays are used under the hood to display inline suggestion, there are s
 - [-] Support for auto-completing when typing: investigate Emacs's built-in ~completion-at-point-functions~'s asynchronous capabilities, or another framework?
   Current implementation: ~starhugger-auto-mode~ using overlays.
 
-- [ ] Find a way to take other files into account [[https://thakkarparth007.github.io/copilot-explorer/posts/copilot-internals.html][Copilot Internals | thakkarparth007.github.io]], or a RAG system.
+- [ ] Find a way to take other files into account [[https://thakkarparth007.github.io/copilot-explorer/posts/copilot-internals.html][Copilot Internals | thakkarparth007.github.io]], a RAG system, get from aider, etc.
 
 - [-] With [[https://github.com/milanglacier/minuet-ai.el][prompt engineering]], allow making use of conversational models, not just limited to FIM-supported coding ones.
-
-- [ ] Use different backends and/or presets for different commands, for example: auto mode uses a lighter model than the explicit ~starhugger-trigger-suggestion~.
-
-- [ ] Streaming mode.
+  Current implementation: clumsy instructions.
