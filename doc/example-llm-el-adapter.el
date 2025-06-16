@@ -24,11 +24,11 @@
   (apply #'starhugger-query-helper
          config callback
          (cl-function
-          (lambda (&rest
+          (lambda (wrapped-callback
+                   cancel-fn-recorder
+                   &rest
                    prompt-comps-result-args
                    &key
-                   record-cancel
-                   remove-cancel
                    &allow-other-keys)
             (-let* (((&alist 'messages messages)
                      (apply #'starhugger-make-prompt-parameters-default
@@ -51,12 +51,11 @@
                           user-prompt
                           :context joined-system-prompt)
                          (lambda (answer &rest _)
-                           (funcall remove-cancel)
-                           (funcall callback
-                                    (list
-                                     (starhugger--post-process-do config answer))))
-                         (lambda (&rest _err) (funcall remove-cancel)))))
-                (funcall record-cancel (lambda () (llm-cancel-request llm-req)))))))
+                           (funcall wrapped-callback (list answer)))
+                         (lambda (&rest err)
+                           (funcall wrapped-callback nil :error err)))))
+                (funcall cancel-fn-recorder
+                         (lambda () (llm-cancel-request llm-req)))))))
          kwargs))
 
 (setq my-llm-el-starhugger-instance

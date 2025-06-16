@@ -365,11 +365,9 @@ to multiple fetches."
           (state (starhugger--suggestion-positional-state))
           (target-num (slot-value config 'num))
           (stop-spin
-           (or (and interact
-                    starhugger-enable-spinner
-                    (starhugger--spinner-start))
+           (or (and interact starhugger-enable-spinner (starhugger--spinner-start))
                #'ignore))
-          (callback
+          (callback1
            (starhugger--lambda (content-choices
                                 accumulated-num
                                 &rest
@@ -399,7 +397,7 @@ to multiple fetches."
                  (when (not (starhugger--active-overlay-p))
                    (starhugger--ensure-inlininng-mode 0))))))))
     (starhugger--query-until-number
-     config target-num callback
+     config target-num callback1
      :stream-callback
      (starhugger--lambda (stream-accumulation &rest stream-res-args &key done &allow-other-keys)
        (when (and stream-accumulation (buffer-live-p orig-buf))

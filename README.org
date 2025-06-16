@@ -1,14 +1,18 @@
 [[https://melpa.org/#/starhugger][file:https://melpa.org/packages/starhugger-badge.svg]] [[https://stable.melpa.org/#/starhugger][file:https://stable.melpa.org/packages/starhugger-badge.svg]]
 
 
-- LLM/AI-powered text & code completion client for Emacs.
+Starhugger is an LLM/AI-powered text & code completion client for Emacs.
 
-- [[https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979][Demo]]:
+[[https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979][Demo]]:
 https://github.com/daanturo/starhugger.el/assets/32123754/5ff826ad-5644-4b15-a811-ad8f3fc78979
 
-- Repository: [[https://gitlab.com/daanturo/starhugger.el]]
+Repository: [[https://gitlab.com/daanturo/starhugger.el]]
 
 (Maybe not up to date) Mirror: [[https://github.com/daanturo/starhugger.el]]
+
+
+Starhugger supports [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]] (preferred) and [[https://github.com/ollama/ollama/blob/main/docs/api.md][Ollama's API]] as backends.  On the model side, it supports FIM-trained (fill in the middle) models, instruction-tuned models support is experimental.
+
 
 * Breaking change!
 
@@ -45,11 +49,9 @@ There are 2 primary entrances:
 - ~M-x~ ~starhugger-trigger-suggestion~: on-demand command, configured with ~starhugger-interactive-config-instance~.
 - ~starhugger-auto-mode~: automatic code suggestion, configured with ~starhugger-auto-config-instance~.
 
-Currently supported backends: [[https://platform.openai.com/docs/api-reference/completions][OpenAI-compatible API]] (preferred) and [[https://github.com/ollama/ollama/blob/main/docs/api.md][Ollama's API]].
+By default, Starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM[fn:openAI-completions] (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the configuration appropriately.
 
-By default, Starhugger use [[https://github.com/ollama/ollama/blob/main/docs/openai.md][Ollama's OpenAI-compatible API]] as the default backend and FIM (fill in the middle) trained models.  For another OpenAI-Compatible provider, you can set the configuration appropriately.
-
-Note that the "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/chat/completions~ doesn't.
+[fn:openAI-completions] The "legacy" ~/completions~ endpoint supports the ~"suffix"~ parameter but ~/chat/completions~ doesn't.
 
 #+begin_src elisp
 ;; Example for the interactive command: a Hugging Face Inference provider, note the "/completions" endpoint for FIM models
@@ -104,7 +106,7 @@ There are only so few FIM-trained models and the majority of released LLMs are i
        :prompt-params-fn #'starhugger-make-prompt-parameters-default))
 #+end_src
 
-The default prompting and post-processing may not be perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.
+The default prompts and post-processing steps may not be perfect, especially on smaller models who usually fail to follow the instruction to produce /only/ the filling code.
 
 To configure, customize any of:
 

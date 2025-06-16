@@ -259,10 +259,9 @@ the corresponding buffer key so that starhugger can terminate them."
         (funcall cancel-fn))
        (process
         (dlet ((kill-buffer-query-functions '()))
-          (-let* ((proc-buf (process-buffer process)))
-            (delete-process process)
-            (when proc-buf
-              (kill-buffer proc-buf)))))
+          (-let* ((proc-buf (process-buffer process))) (delete-process process)
+                 (when proc-buf
+                   (kill-buffer proc-buf)))))
        (:else
         (message "`starhugger' no known way to cancel request: %S" obj))))))
 
@@ -337,8 +336,7 @@ CODE-LENGTH; and vice-versa for the prefix-suffix case."
     :initarg :parameters
     :initform '((stream . :false))
     :type list
-    :documentation
-    "Additional request parameters.
+    :documentation "Additional request parameters.
 \"stream\" being false is just an example, it's enforced by the
 \\='stream slot.")
    (num
@@ -359,16 +357,14 @@ CODE-LENGTH; and vice-versa for the prefix-suffix case."
    (context-fn
     :initarg :context-fn
     :initform #'starhugger--context-dummy
-    :documentation
-    "Asynchronous function to query other context, ideally repository-wide code.
+    :documentation "Asynchronous function to query other context, ideally repository-wide code.
 Arguments: relative filename, prefix, suffix, a callback function (will be called
 with the context string), the rest are ignored at the moment.")
    (system-prompts
     :initarg :system-prompts
     :initform []
     :type sequence
-    :documentation
-    "Sequence of system prompts.
+    :documentation "Sequence of system prompts.
 Each element can be:
 - A string: a system prompt.
 - t : substitute with `starhugger-instruct-default-system-prompts'.
@@ -378,8 +374,7 @@ By default for chat models, this  will be initialized to [t].")
     :initarg :other-prompts
     :initform []
     :type sequence
-    :documentation
-    "Sequence of messages before the final user prompt, after system prompts.
+    :documentation "Sequence of messages before the final user prompt, after system prompts.
 Each element is an alist, each alist contains at least 2 keys: role and
 content.  See
 https://platform.openai.com/docs/api-reference/chat/create#chat-create-messages.
@@ -403,8 +398,7 @@ Currently this is only used for instruction-tuned models.")
     :initarg :join-prompts
     :initform nil
     :type (or null string)
-    :documentation
-    "For non-chat completions, join all non-suffix (prefix/prompt, system
+    :documentation "For non-chat completions, join all non-suffix (prefix/prompt, system
 prompts, etc.) into a single prompt using this separator.  Use when the
 provider doesn't support the \"prompt\" argument being an array, such as
 Ollama.  By default without repo-wide context, this isn't so relevant
@@ -424,8 +418,7 @@ incomplete content being streamed.")
    (post-process
     :initarg :post-process
     :initform []
-    :documentation
-    "Sequence of post-processing steps for model responses.
+    :documentation "Sequence of post-processing steps for model responses.
 This is useful for instruction-tuned models, base models generally don't need
 post-processing.
 Each element can be:
@@ -608,15 +601,13 @@ CONFIG is used to dispatch the parser."
           (goto-char starhugger--stream-buffer-current-position)
         (setq starhugger--stream-buffer-current-position
               starhugger--stream-buffer-headers-end-position))
-      (-let*
-          ((parse-success t) (done-final nil) (last-success-parsed nil))
+      (-let* ((parse-success t) (done-final nil) (last-success-parsed nil))
         ;; Potentially multiple complete and incomplete objects in an outputting
         ;; chunk
         (while parse-success
           (condition-case _
-              (-let*
-                  ((parsed-alist (starhugger--stream-parse-chunk-to-content config))
-                   ((&alist 'content new-content 'done done-json-val) parsed-alist))
+              (-let* ((parsed-alist (starhugger--stream-parse-chunk-to-content config))
+                      ((&alist 'content new-content 'done done-json-val) parsed-alist))
                 (setq starhugger--stream-buffer-accumulation
                       (concat starhugger--stream-buffer-accumulation new-content))
                 (setq last-success-parsed parsed-alist)
@@ -683,17 +674,16 @@ Or the JSON object at line start."
                                error
                                stream-accumulation
                                &allow-other-keys)
-            (-let*
-                ((time-end (current-time))
-                 (content-choices
-                  (cond
-                   (error
-                    '())
-                   (stream-accumulation
-                    (setq done-by-stream t)
-                    (ensure-list stream-accumulation))
-                   (t
-                    (starhugger--choices-from-response-data config data-alist)))))
+            (-let* ((time-end (current-time))
+                    (content-choices
+                     (cond
+                      (error
+                       '())
+                      (stream-accumulation
+                       (setq done-by-stream t)
+                       (ensure-list stream-accumulation))
+                      (t
+                       (starhugger--choices-from-response-data config data-alist)))))
               (unwind-protect
                   (when (or (not done-by-stream) content-choices error)
                     (funcall
@@ -715,23 +705,19 @@ Or the JSON object at line start."
                      'post
                      url
                      :headers headers
-                     :as
-                     (lambda ()
-                       (cond
-                        (stream-flag
-                         (ignore-errors
-                           (starhugger--json-parse-buffer)))
-                        (:else
-                         (starhugger--json-parse-buffer))))
+                     :as (lambda ()
+                           (cond
+                            (stream-flag
+                             (ignore-errors
+                               (starhugger--json-parse-buffer)))
+                            (:else
+                             (starhugger--json-parse-buffer))))
                      :body data-in-str
-                     :then
-                     (lambda (data-alist &rest _)
-                       (funcall complete-fn data-alist))
-                     :else
-                     (lambda (err &rest _) (funcall complete-fn nil :error err))
+                     :then (lambda (data-alist &rest _)
+                             (funcall complete-fn data-alist))
+                     :else (lambda (err &rest _) (funcall complete-fn nil :error err))
                      (append (and stream-flag (list :filter filter-fn))))))
-      (-let*
-          () (list :process plz-process :object plz-process :caller caller)))))
+      (-let* () (list :process plz-process :object plz-process :caller caller)))))
 
 (cl-defmethod starhugger--prompt-components-from-buffer
   ((config starhugger-config) callback &rest args &key &allow-other-keys)
@@ -1032,8 +1018,8 @@ The replacement for %s is:"
 ;;;; Querying functions
 
 (cl-defun starhugger-query-helper (config
-                                   _callback-after-response
-                                   callback-after-prompts
+                                   callback-after-response
+                                   callback-after-prompt-components
                                    &rest
                                    kwargs
                                    &key
@@ -1043,9 +1029,20 @@ The replacement for %s is:"
                                    prefix
                                    suffix
                                    &allow-other-keys)
-  "Wrapper to simply writing an implementation for `starhugger-query'."
+  "Wrapper to simply writing an implementation for `starhugger-query'.
+CONFIG: the `starhugger-config' instance.
+
+CALLBACK-AFTER-RESPONSE: see `starhugger-query''s CALLBACK.
+
+CALLBACK-AFTER-PROMPT-COMPONENTS argument list:
+(wrapped-callback cancel-fn-recorder &rest prompt-result-args &key
+record-cancel &allow-other-keys); where: wrapped-callback is
+CALLBACK-AFTER-RESPONSE called with post-processed answers;
+cancel-fn-recorder is a function that accepts the request cancelling
+function as its argument, to call it automatically when
+CALLBACK-AFTER-RESPONSE is finished."
   (-let* ((id (gensym "starhugger"))
-          (record-cancel-fn
+          (cancel-fn-recorder
            (lambda (cancel-info)
              (-let* ((cancel-obj
                       (cond
@@ -1054,23 +1051,19 @@ The replacement for %s is:"
                        ((plistp cancel-info)
                         (append (list :id id :caller caller) cancel-info)))))
                (cl-assert cancel-obj)
-               (starhugger--request-table-record cancel-obj buffer)
-               ;; This may do unexpected things if callback-after-response is a
-               ;; named function?
-               ;; (letrec ((clear-adv
-               ;;           (lambda (&rest _)
-               ;;             (remove-function callback-after-response clear-adv)
-               ;;             (starhugger--request-table-remove id buffer))))
-               ;;   (add-function :before callback-after-response clear-adv))
-               )))
-          (remove-cancel-fn
-           (lambda () (starhugger--request-table-remove id buffer)))
+               (starhugger--request-table-record cancel-obj buffer))))
+          (callback-after-response-wrapped
+           (starhugger--lambda (content-choices &rest response-args)
+             (unwind-protect
+                 (-let* ((processed-texts
+                          (--map (starhugger--post-process-do config it) content-choices)))
+                   (apply callback-after-response processed-texts response-args))
+               (starhugger--request-table-remove id buffer))))
           (callback
            (starhugger--lambda (&rest args1)
-             (apply callback-after-prompts
-                    :record-cancel record-cancel-fn
-                    :remove-cancel
-                    remove-cancel-fn
+             (apply callback-after-prompt-components
+                    callback-after-response-wrapped
+                    cancel-fn-recorder
                     args1))))
     (cond
      ;; No need to find prompt components again
@@ -1093,12 +1086,22 @@ The replacement for %s is:"
      prefix
      suffix
      num
+     stream-callback
      &allow-other-keys)
   (:documentation
    "CALLBACK is called with generated content choices & variadic info.
-CALLBACK's argument list (texts &rest _ &key error &allow-other-keys).
 PROMPT is prioritized over constructing one from PREFIX, SUFFIX,
-CONTEXT, etc."))
+CONTEXT, etc.
+
+CALLBACK's argument list: (texts &rest _ &key error &allow-other-keys).
+
+STREAM-CALLBACK's argument list:
+(accumulated-text &key done &allow-other-keys).
+
+When streaming, accumulated text isn't post-processed.  When the request
+is done (either non-stream or stream), the list of text contents (or
+list containing the single accumulated text) is post-processed and
+passed to CALLBACK."))
 
 (cl-defmethod starhugger-query
   ((config starhugger-config)
@@ -1118,29 +1121,16 @@ CONTEXT, etc."))
   (-let* ((buffer (or buffer (current-buffer))))
     (apply #'starhugger-query-helper
            config callback
-           (starhugger--lambda (&rest
-                                helper-args &key record-cancel remove-cancel &allow-other-keys)
+           (starhugger--lambda (wrapped-callback
+                                cancel-fn-recorder &rest helper-args &key &allow-other-keys)
              (-let* ((req-plist
                       (apply #'starhugger--do-request
                              config
-                             (starhugger--lambda (content-choices
-                                                  &rest
-                                                  perform-request-result
-                                                  &key
-                                                  _error
-                                                  &allow-other-keys)
-                               (funcall remove-cancel)
-                               (-let* ((processed-content-choices
-                                        (--map (starhugger--post-process-do config it)
-                                               content-choices)))
-                                 (apply callback
-                                        processed-content-choices
-                                        perform-request-result)))
-                             :caller
-                             (or caller #'starhugger-query)
-                             helper-args)))
-               (funcall record-cancel req-plist)
-               req-plist))
+                             (starhugger--lambda (processed-choices
+                                                  &rest request-result &key _error &allow-other-keys)
+                               (apply wrapped-callback processed-choices request-result))
+                             :caller (or caller #'starhugger-query) helper-args)))
+               (funcall cancel-fn-recorder req-plist) req-plist))
            :buffer buffer
            :prompt prompt args)))
 
@@ -1158,38 +1148,41 @@ CONTEXT, etc."))
     ;; Asynchronously construct prompt components
     (apply #'starhugger-query-helper
            config callback
-           (starhugger--lambda (&rest
-                                async-prompt-result &key context prefix suffix &allow-other-keys)
-             (-let*
-                 ((code-len (+ (length prefix) (length suffix)))
-                  ;; This callback is ran when the request to the language model
-                  ;; returns
-                  (query-callback
-                   (starhugger--lambda (processed-content-choices
-                                        &rest request-do-result &key error &allow-other-keys)
-                     (starhugger--with-live-buffer-or-current orig-buf
-                       (-let* ((err-str (format "%S" error)))
-                         (when (and error starhugger-notify-request-error)
-                           (message "`starhugger' response error: %s" err-str))
-                         (apply callback
-                                processed-content-choices
-                                request-do-result)))))
-                  (request-obj
-                   (cond
-                    ((< 0 code-len)
-                     (apply #'starhugger-query
-                            config
-                            nil
-                            query-callback
-                            :context context
-                            :prefix prefix
-                            :suffix suffix
-                            :num
-                            num
-                            (append async-prompt-result args)))
-                    (:else
-                     (funcall query-callback '())))))
-               request-obj))
+           (starhugger--lambda (wrapped-callback
+                                cancel-fn-recorder
+                                &rest
+                                helper-args
+                                &key
+                                context
+                                prefix
+                                suffix
+                                &allow-other-keys)
+             (-let* ((code-len (+ (length prefix) (length suffix)))
+                     (wrapped-wrapped-callback
+                      (starhugger--lambda (processed-choices
+                                           &rest request-do-result &key error &allow-other-keys)
+                        (starhugger--with-live-buffer-or-current orig-buf
+                          (-let* ((err-str (format "%S" error)))
+                            (when (and error starhugger-notify-request-error)
+                              (message "`starhugger' response error: %s" err-str))
+                            (apply wrapped-callback
+                                   processed-choices
+                                   request-do-result)))))
+                     (req-plist
+                      (cond
+                       ((< 0 code-len)
+                        (apply #'starhugger--do-request
+                               config
+                               wrapped-wrapped-callback
+                               :context context
+                               :prefix prefix
+                               :suffix suffix
+                               :num num
+                               :prompt nil
+                               (append helper-args args)))
+                       (:else
+                        (funcall wrapped-wrapped-callback '())))))
+               (funcall cancel-fn-recorder req-plist) req-plist))
            :prompt nil)))
 
 (cl-defun starhugger--query-until-number (config num callback &rest args &key prompt &allow-other-keys)
@@ -1208,32 +1201,22 @@ arguments."
               (lambda (this-time-num old-accumulated-num)
                 (-let* ((query-fn-callback
                          (starhugger--lambda (content-choices
-                                              &rest
-                                              query-internal-result
-                                              &key
-                                              error
-                                              &allow-other-keys)
+                                              &rest query-internal-result &key error &allow-other-keys)
                            (-let* ((just-got-num (length content-choices))
-                                   (new-accumulated-num
-                                    (+ old-accumulated-num just-got-num))
-                                   (next-time-num
-                                    (- target-num new-accumulated-num))
+                                   (new-accumulated-num (+ old-accumulated-num just-got-num))
+                                   (next-time-num (- target-num new-accumulated-num))
                                    (cb-result
                                     (apply callback
                                            content-choices
                                            new-accumulated-num
                                            query-internal-result)))
-                             (when (not
-                                    (or error
-                                        (null cb-result)
-                                        (<= next-time-num 0)))
+                             (when (not (or error (null cb-result) (<= next-time-num 0)))
                                (funcall fetching-loop next-time-num))))))
                   (apply #'starhugger-query
                          config
                          prompt
                          query-fn-callback
-                         :num
-                         this-time-num
+                         :num this-time-num
                          args)))))
       (funcall fetching-loop target-num 0))))
 
